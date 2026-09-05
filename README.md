@@ -45,8 +45,10 @@ sudo systemctl enable --now telemt-egress-tproxy.service
 
 The interception is limited to telemt's container IP, Telegram CIDRs, and TCP port 443.
 
-The host-specific defaults assume telemt has Docker IP `192.168.128.2` and the
-host interface is `eth0`. Override `TELEMT_SOURCE_IP` and `HOST_IFACE` through
+The host-specific defaults assume telemt has Docker IP `192.168.128.2`, runs as
+UID `65532`, and the host interface is `eth0`. For host networking, `OUTPUT`
+matches `TELEMT_UID` so sing-box's root-owned outbound connections are excluded.
+Override `TELEMT_SOURCE_IP`, `TELEMT_UID` and `HOST_IFACE` through
 `/etc/default/telemt-egress-tproxy` when deploying on a different layout.
 
 After changing subscriptions, use `make refresh`. It refreshes the state, validates
