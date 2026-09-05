@@ -7,7 +7,7 @@ HOST_IFACE=${HOST_IFACE:-eth0}
 
 start() {
     /usr/sbin/nft delete table ip "$NFT_TABLE" 2>/dev/null || true
-    /usr/sbin/nft -f - <<'EOF'
+    /usr/sbin/nft -f - <<EOF
 table ip telemt_tproxy {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;

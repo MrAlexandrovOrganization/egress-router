@@ -277,7 +277,7 @@ func parseURI(raw, tag string) (map[string]any, error) {
 		method, password, ok := strings.Cut(userinfo, ":")
 		supported := map[string]bool{"aes-128-gcm": true, "aes-256-gcm": true, "chacha20-ietf-poly1305": true, "2022-blake3-aes-128-gcm": true, "2022-blake3-aes-256-gcm": true, "2022-blake3-chacha20-poly1305": true}
 		if !ok || !supported[method] {
-			return nil, fmt.Errorf("unsupported shadowsocks method: %s", method)
+			return nil, errors.New("unsupported shadowsocks method")
 		}
 		item["type"], item["method"], item["password"] = "shadowsocks", method, password
 	default:
@@ -315,8 +315,8 @@ func (m *Manager) fetch(rawURL string) ([]byte, error) {
 
 func validateConfig(path string) error {
 	command := exec.Command("sing-box", "check", "-c", path)
-	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("sing-box check: %s", strings.TrimSpace(string(output)))
+	if _, err := command.CombinedOutput(); err != nil {
+		return errors.New("sing-box config validation failed")
 	}
 	return nil
 }
@@ -492,7 +492,7 @@ func (m *Manager) handler(w http.ResponseWriter, request *http.Request) {
 		}
 		result, err := m.build()
 		if err != nil {
-			m.reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			m.reply(w, http.StatusBadRequest, map[string]string{"error": "refresh failed; check service logs"})
 			return
 		}
 		m.reply(w, http.StatusOK, result)
