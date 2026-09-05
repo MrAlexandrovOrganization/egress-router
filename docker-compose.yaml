@@ -1,7 +1,7 @@
 services:
   subscription-manager:
     build:
-      context: ../subscription-manager
+      context: ./subscription-manager
     container_name: subscription-manager
     restart: unless-stopped
     user: "1000:1000"
@@ -14,7 +14,7 @@ services:
     volumes:
       - ./config.json:/data/base-config.json:ro
       - ./runtime:/data/runtime:rw
-      - ../subscription-manager/subscriptions.json:/data/subscriptions.json:rw
+      - ./subscription-manager/subscriptions.json:/data/subscriptions.json:rw
     environment:
       BASE_CONFIG: /data/base-config.json
       OUTPUT_CONFIG: /data/runtime/config.json

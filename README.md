@@ -4,12 +4,11 @@ sing-box egress router for telemt and local Docker services.
 
 ## First deployment
 
-Clone this repository next to `subscription-manager`:
+Clone this repository:
 
 ```text
 network/
   egress-router/
-  subscription-manager/
 ```
 
 Create the machine-specific base config and initialize subscription state:
@@ -17,14 +16,14 @@ Create the machine-specific base config and initialize subscription state:
 ```bash
 cp config.json.example config.json
 mkdir -p runtime
-cp ../subscription-manager/subscriptions.json.example ../subscription-manager/subscriptions.json
+cp subscription-manager/subscriptions.json.example subscription-manager/subscriptions.json
 docker compose up -d --build
 ```
 
 Then add subscriptions from the machine itself:
 
 ```bash
-make -C ../subscription-manager add NAME=provider URL=https://example.invalid/subscription
+make -C subscription-manager add NAME=provider URL=https://example.invalid/subscription
 ```
 
 Install the optional telemt interception on a host where telemt has Docker IP `192.168.128.2`:
