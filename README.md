@@ -35,11 +35,19 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now telemt-egress-tproxy.service
 ```
 
+For host-networked telemt, set the host source address before enabling the unit:
+
+```bash
+sudo install -d -m 0755 /etc/default
+printf '%s\n' 'TELEMT_SOURCE_IP=10.130.0.5' 'HOST_IFACE=eth0' | sudo tee /etc/default/telemt-egress-tproxy >/dev/null
+sudo systemctl enable --now telemt-egress-tproxy.service
+```
+
 The interception is limited to telemt's container IP, Telegram CIDRs, and TCP port 443.
 
-The host-specific values are intentional: the nftables rule assumes telemt has
-Docker IP `192.168.128.2`, and the host interface is `eth0`. Change these values
-in `telemt-egress-tproxy.sh` when deploying on a different Docker/network layout.
+The host-specific defaults assume telemt has Docker IP `192.168.128.2` and the
+host interface is `eth0`. Override `TELEMT_SOURCE_IP` and `HOST_IFACE` through
+`/etc/default/telemt-egress-tproxy` when deploying on a different layout.
 
 After changing subscriptions, use `make refresh`. It refreshes the state, validates
 the generated config, and recreates `egress-router` so the new nodes are applied.

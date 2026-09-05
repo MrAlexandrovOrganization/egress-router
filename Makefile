@@ -7,6 +7,8 @@ init:
 	@test -e config.json || cp config.json.example config.json
 	@test -e subscription-manager/subscriptions.json || cp subscription-manager/subscriptions.json.example subscription-manager/subscriptions.json
 	mkdir -p runtime
+	@test ! -d runtime/config.json || (echo "runtime/config.json is a directory; remove it before deployment" >&2; exit 1)
+	@test -f runtime/config.json || cp config.json runtime/config.json
 
 up: init
 	$(COMPOSE) up -d --build
