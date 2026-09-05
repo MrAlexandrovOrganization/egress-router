@@ -52,7 +52,7 @@ func TestBuildUsesLocalFixture(t *testing.T) {
 	outputPath := filepath.Join(directory, "runtime", "config.json")
 	statePath := filepath.Join(directory, "subscriptions.json")
 	base := map[string]any{"outbounds": []any{
-		map[string]any{"type": "urltest", "tag": "telegram-auto", "outbounds": []any{}},
+		map[string]any{"type": "urltest", "tag": "telegram-auto", "outbounds": []any{"direct-eth"}},
 		map[string]any{"type": "direct", "tag": "direct-eth"},
 	}}
 	baseData, _ := json.Marshal(base)
@@ -77,6 +77,24 @@ func TestBuildUsesLocalFixture(t *testing.T) {
 	}
 	if _, err := os.Stat(outputPath); err != nil {
 		t.Fatal(err)
+	}
+	generatedData, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generated map[string]any
+	if err := json.Unmarshal(generatedData, &generated); err != nil {
+		t.Fatal(err)
+	}
+	var telegramAuto map[string]any
+	for _, outbound := range generated["outbounds"].([]any) {
+		item := outbound.(map[string]any)
+		if item["tag"] == "telegram-auto" {
+			telegramAuto = item
+		}
+	}
+	if got := telegramAuto["outbounds"].([]any); len(got) != 2 || got[1] != "direct-eth" {
+		t.Fatalf("telegram fallback = %#v", telegramAuto["outbounds"])
 	}
 }
 

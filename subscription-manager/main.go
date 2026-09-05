@@ -373,7 +373,8 @@ func (m *Manager) build() (map[string]any, error) {
 	if values, ok := base["outbounds"].([]any); ok {
 		for _, value := range values {
 			if item, ok := value.(map[string]any); ok && (item["tag"] == "telegram-auto" || item["tag"] == "default-auto") {
-				item["outbounds"] = generatedTags
+				existing, _ := item["outbounds"].([]any)
+				item["outbounds"] = append(generatedTags, existing...)
 			}
 		}
 		filtered := make([]any, 0, len(values)+len(outbounds))
