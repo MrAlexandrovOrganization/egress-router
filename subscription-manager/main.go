@@ -342,14 +342,14 @@ func (m *Manager) build() (map[string]any, error) {
 	for _, subscription := range state.Subscriptions {
 		body, err := m.fetch(subscription.URL)
 		if err != nil {
-			errorsFound = append(errorsFound, fmt.Sprintf("%s: fetch failed: %v", subscription.Name, err))
+			errorsFound = append(errorsFound, fmt.Sprintf("%s: fetch failed", subscription.Name))
 			continue
 		}
 		for index, rawURI := range decodeBody(body) {
 			tag := "sub-" + unsafeName.ReplaceAllString(subscription.Name, "-") + "-" + nodeName(fragment(rawURI), index+1)
 			item, err := parseURI(rawURI, tag)
 			if err != nil {
-				errorsFound = append(errorsFound, fmt.Sprintf("%s:%d: %v", subscription.Name, index+1, err))
+				errorsFound = append(errorsFound, fmt.Sprintf("%s:%d: invalid node", subscription.Name, index+1))
 				continue
 			}
 			fingerprintData := make(map[string]any, len(item))
