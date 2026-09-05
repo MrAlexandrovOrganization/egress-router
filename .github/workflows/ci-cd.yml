@@ -1,0 +1,58 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-go@v5.5.0
+        with:
+          go-version-file: subscription-manager/go.mod
+          cache: true
+          cache-dependency-path: subscription-manager/go.mod
+      - name: Run checks
+        run: make check
+
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Build images
+        run: make build
+
+  deploy:
+    name: Deploy to VM
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -eu
+            cd "${{ secrets.VM_PROJECT_PATH }}"
+            git pull --ff-only origin main
+            make deploy
+            make status

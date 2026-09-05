@@ -58,3 +58,20 @@ docker compose down
 ```
 
 `config.json` and generated `runtime/config.json` are intentionally not tracked.
+
+## CI/CD
+
+Pull requests run `make check` and build the subscription-manager image. A push
+to `main` deploys only after both checks pass. The deploy job connects over SSH
+and expects these GitHub Actions secrets:
+
+```text
+VM_HOST
+VM_USER
+VM_SSH_KEY
+VM_PROJECT_PATH=/home/maxim/projects/infra/network/egress-router
+```
+
+The VM keeps its ignored `config.json`, `subscription-manager/subscriptions.json`
+and `runtime/` files. Deployment updates tracked files with `git pull --ff-only`,
+then runs `make deploy` and `make status`.
