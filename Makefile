@@ -1,4 +1,4 @@
-.PHONY: init up down logs status config-check compose-check test check install-tproxy refresh
+.PHONY: init up down logs status fmt fmt-check config-check compose-check test check install-tproxy refresh
 
 COMPOSE := docker compose -p egress-router -f docker-compose.yaml
 SING_BOX_IMAGE := ghcr.io/sagernet/sing-box:v1.14.0@sha256:4bed9332a0013fef72c31200a84e8fc0ed91a5ab2fe373a69f0acbbbbfbef3c5
@@ -20,17 +20,23 @@ logs:
 status:
 	$(COMPOSE) ps
 
+fmt:
+	gofmt -w subscription-manager/*.go
+
+fmt-check:
+	@files="$$(gofmt -l subscription-manager/*.go)"; test -z "$$files"
+
 config-check:
-	python3 -m json.tool config.json.example >/dev/null
+	$(MAKE) -C subscription-manager test
 	docker run --rm -i -v "$(PWD)/config.json.example:/config.json:ro" $(SING_BOX_IMAGE) check -c /config.json
 
 compose-check:
 	$(COMPOSE) config --quiet
 
 test:
-	python3 -m unittest discover -s subscription-manager/tests -v
+	$(MAKE) -C subscription-manager test
 
-check: config-check compose-check test
+check: fmt-check config-check compose-check test
 
 install-tproxy:
 	sudo install -m 0755 telemt-egress-tproxy.sh /usr/local/sbin/telemt-egress-tproxy

@@ -11,13 +11,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.13"
-      - name: Check Python and shell syntax
+          go-version-file: subscription-manager/go.mod
+      - name: Check Go and shell syntax
         run: |
-          python -m py_compile subscription-manager/manager.py
-          python -m py_compile subscription-manager/tests/test_manager.py
+          make fmt-check
           sh -n telemt-egress-tproxy.sh
       - name: Run offline tests
         run: make test
