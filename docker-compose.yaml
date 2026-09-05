@@ -26,6 +26,8 @@ services:
     image: ghcr.io/sagernet/sing-box:v1.14.0@sha256:4bed9332a0013fef72c31200a84e8fc0ed91a5ab2fe373a69f0acbbbbfbef3c5
     container_name: egress-router
     restart: unless-stopped
+    group_add:
+      - "1000"
     network_mode: host
     read_only: true
     security_opt:

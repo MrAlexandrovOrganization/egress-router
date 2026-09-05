@@ -395,6 +395,10 @@ func (m *Manager) build() (map[string]any, error) {
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o640); err != nil {
+		_ = temporary.Close()
+		return nil, err
+	}
 	data, err := json.MarshalIndent(base, "", "  ")
 	if err == nil {
 		_, err = temporary.Write(append(data, '\n'))
