@@ -21,12 +21,24 @@ STATE = Path(os.environ.get("STATE_FILE", "/data/subscriptions.json"))
 INTERVAL = int(os.environ.get("REFRESH_INTERVAL", "3600"))
 PORT = int(os.environ.get("PORT", "19091"))
 LOCK = threading.Lock()
+MAX_REQUEST_BODY = 64 * 1024
 
 
 def read_state():
     if not STATE.exists():
         return {"subscriptions": []}
     return json.loads(STATE.read_text())
+
+
+def write_state(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="subscriptions.", suffix=".json", dir=STATE.parent)
+    os.close(fd)
+    try:
+        Path(temporary).write_text(json.dumps(state, indent=2) + "\n")
+        os.replace(temporary, STATE)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def decode_body(body):
@@ -214,13 +226,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {"error": "not found"})
         try:
             if self.path == "/subscriptions":
-                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-                if not payload.get("name") or not payload.get("url", "").startswith("https://"):
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_REQUEST_BODY:
+                    raise ValueError("request body must be between 1 and 65536 bytes")
+                payload = json.loads(self.rfile.read(length))
+                url = payload.get("url", "")
+                parsed_url = urlsplit(url)
+                if not payload.get("name") or parsed_url.scheme != "https" or not parsed_url.hostname:
                     raise ValueError("name and an https URL are required")
                 state = read_state()
                 state["subscriptions"] = [x for x in state["subscriptions"] if x["name"] != payload["name"]]
-                state["subscriptions"].append({"name": payload["name"], "url": payload["url"]})
-                STATE.write_text(json.dumps(state, indent=2) + "\n")
+                state["subscriptions"].append({"name": payload["name"], "url": url})
+                write_state(state)
             return self.reply(200, build())
         except Exception as exc:
             self.reply(400, {"error": str(exc)})

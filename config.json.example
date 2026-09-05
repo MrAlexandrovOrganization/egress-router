@@ -31,7 +31,7 @@
     {
       "type": "urltest",
       "tag": "telegram-auto",
-      "outbounds": [],
+      "outbounds": ["direct-eth"],
       "url": "https://telegram.org/",
       "interval": "30s",
       "tolerance": 100,

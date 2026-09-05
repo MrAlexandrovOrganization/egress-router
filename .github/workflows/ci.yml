@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check Python and shell syntax
+        run: |
+          python -m py_compile subscription-manager/manager.py
+          python -m py_compile subscription-manager/tests/test_manager.py
+          sh -n telemt-egress-tproxy.sh
+      - name: Run offline tests
+        run: make test
+      - name: Validate Compose and config
+        run: make config-check compose-check
+      - name: Build subscription manager
+        run: docker build -t subscription-manager-ci subscription-manager
