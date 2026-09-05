@@ -1,0 +1,79 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "redirect",
+      "tag": "telemt-tproxy",
+      "listen": "0.0.0.0",
+      "listen_port": 12345
+    },
+    {
+      "type": "mixed",
+      "tag": "auto-in",
+      "listen": "127.0.0.1",
+      "listen_port": 10880
+    },
+    {
+      "type": "mixed",
+      "tag": "auto-docker-in",
+      "listen": "172.17.0.1",
+      "listen_port": 10880
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct-eth"
+    },
+    {
+      "type": "urltest",
+      "tag": "telegram-auto",
+      "outbounds": [],
+      "url": "https://telegram.org/",
+      "interval": "30s",
+      "tolerance": 100,
+      "interrupt_exist_connections": false
+    },
+    {
+      "type": "urltest",
+      "tag": "default-auto",
+      "outbounds": ["direct-eth"],
+      "url": "https://cp.cloudflare.com/generate_204",
+      "interval": "30s",
+      "tolerance": 100,
+      "interrupt_exist_connections": false
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "rules": [
+      {
+        "ip_is_private": true,
+        "outbound": "direct-eth"
+      },
+      {
+        "domain_suffix": ["telegram.org", "telegram.me", "telegram.dog", "t.me"],
+        "ip_cidr": [
+          "91.105.192.0/23",
+          "91.108.4.0/22",
+          "91.108.8.0/22",
+          "91.108.12.0/22",
+          "91.108.16.0/22",
+          "91.108.20.0/22",
+          "91.108.56.0/22",
+          "149.154.160.0/20",
+          "185.76.151.0/24"
+        ],
+        "outbound": "telegram-auto"
+      }
+    ],
+    "final": "default-auto"
+  }
+}

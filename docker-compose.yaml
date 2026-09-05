@@ -1,0 +1,53 @@
+services:
+  subscription-manager:
+    build:
+      context: ../subscription-manager
+    container_name: subscription-manager
+    restart: unless-stopped
+    user: "1000:1000"
+    network_mode: host
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./config.json:/data/base-config.json:ro
+      - ./runtime:/data/runtime:rw
+      - ../subscription-manager/subscriptions.json:/data/subscriptions.json:rw
+    environment:
+      BASE_CONFIG: /data/base-config.json
+      OUTPUT_CONFIG: /data/runtime/config.json
+      STATE_FILE: /data/subscriptions.json
+      REFRESH_INTERVAL: "3600"
+      PORT: "19091"
+
+  egress-router:
+    image: ghcr.io/sagernet/sing-box:v1.14.0@sha256:4bed9332a0013fef72c31200a84e8fc0ed91a5ab2fe373a69f0acbbbbfbef3c5
+    container_name: egress-router
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    volumes:
+      - ./runtime/config.json:/etc/sing-box/config.json:ro
+    command: [-D, /var/lib/sing-box, -C, /etc/sing-box, run]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+      - /var/lib/sing-box:rw,nosuid,nodev,noexec,size=32m
+    healthcheck:
+      test: ["CMD", "sing-box", "check", "-c", "/etc/sing-box/config.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
