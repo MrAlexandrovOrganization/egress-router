@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -64,9 +65,41 @@ func postSubscription(m *Manager, sub Subscription) *httptest.ResponseRecorder {
 	return w
 }
 
+// Tests using the process-wide default logger must not run in parallel.
+func captureLogs(t *testing.T, options *slog.HandlerOptions) *bytes.Buffer {
+	t.Helper()
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, options)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &output
+}
+
+func logRecords(t *testing.T, output *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("invalid JSON log: %v", err)
+		}
+		for _, secret := range []string{"secret", "credential", "example.test", "://"} {
+			if bytes.Contains(line, []byte(secret)) {
+				t.Fatal("unsanitized log record")
+			}
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
 func TestFailedRefreshPreservesConfig(t *testing.T) {
 	for _, failure := range []string{"http", "empty", "comments", "comments-base64", "garbage", "all-invalid", "base64", "port", "transport", "validation"} {
 		t.Run(failure, func(t *testing.T) {
+			logs := captureLogs(t, nil)
 			var mu sync.Mutex
 			bad := false
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +139,9 @@ func TestFailedRefreshPreservesConfig(t *testing.T) {
 			if _, err := m.build(); err != nil {
 				t.Fatal(err)
 			}
+			if logs.Len() != 0 {
+				t.Fatal("clean refresh logged at default INFO level")
+			}
 			before, _ := os.ReadFile(m.output)
 			mu.Lock()
 			bad = true
@@ -126,6 +162,10 @@ func TestFailedRefreshPreservesConfig(t *testing.T) {
 			m.handler(w, httptest.NewRequest(http.MethodGet, "/health", nil))
 			if w.Code != 503 || strings.Contains(w.Body.String(), "secret") {
 				t.Fatalf("health = %d %s", w.Code, w.Body)
+			}
+			records := logRecords(t, logs)
+			if len(records) != 1 || records[0]["level"] != "ERROR" || records[0]["msg"] != "refresh failed" || records[0]["error"] != m.lastError || m.lastError == "" {
+				t.Fatalf("failure logs = %+v", records)
 			}
 		})
 	}
@@ -190,6 +230,7 @@ func TestMixedSubscriptionsPublishWithWarnings(t *testing.T) {
 	for _, encoded := range []bool{false, true} {
 		for _, rejected := range []int{3, 25} {
 			t.Run(fmt.Sprintf("base64=%t/skipped=%d", encoded, rejected), func(t *testing.T) {
+				logs := captureLogs(t, nil)
 				body := "# provider metadata\n  # https://example.test\n" + strings.Repeat("tuic://credential-secret@example.test:443\n", rejected-1) + "trojan://credential-secret@example.test:65536\n" + "trojan://secret@example.test:443?sni=tls.test\n"
 				if encoded {
 					body = base64.StdEncoding.EncodeToString([]byte(body))
@@ -207,6 +248,7 @@ func TestMixedSubscriptionsPublishWithWarnings(t *testing.T) {
 					t.Fatalf("duplicate addition = %d %s", w.Code, w.Body)
 				}
 				w = httptest.NewRecorder()
+				logs.Reset()
 				m.handler(w, httptest.NewRequest(http.MethodPost, "/refresh", nil))
 				if w.Code != http.StatusOK {
 					t.Fatalf("refresh = %d %s", w.Code, w.Body)
@@ -225,6 +267,18 @@ func TestMixedSubscriptionsPublishWithWarnings(t *testing.T) {
 				}
 				if result.Nodes != 1 || result.SkippedNodes != rejected*2 || len(result.Errors) != wantWarnings {
 					t.Fatalf("result = %+v", result)
+				}
+				records := logRecords(t, logs)
+				if len(records) != wantWarnings+1 {
+					t.Fatalf("log count = %d, want %d", len(records), wantWarnings+1)
+				}
+				if records[0]["level"] != "WARN" || records[0]["msg"] != "refresh succeeded with skipped nodes" || records[0]["nodes"] != float64(1) || records[0]["skipped_nodes"] != float64(rejected*2) {
+					t.Fatalf("summary = %+v", records[0])
+				}
+				for i, record := range records[1:] {
+					if record["level"] != "WARN" || record["msg"] != "refresh warning" || record["error"] != result.Errors[i] {
+						t.Fatalf("warning = %+v", record)
+					}
 				}
 				if strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "example.test") {
 					t.Fatalf("unsanitized warnings: %s", w.Body)
@@ -261,6 +315,30 @@ func TestMixedSubscriptionsPublishWithWarnings(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCleanRefreshLogging(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debug=%t", debug), func(t *testing.T) {
+			var options *slog.HandlerOptions
+			if debug {
+				options = &slog.HandlerOptions{Level: slog.LevelDebug}
+			}
+			logs := captureLogs(t, options)
+			m := fixtureManager(t, http.DefaultClient)
+			if _, err := m.build(); err != nil {
+				t.Fatal(err)
+			}
+			records := logRecords(t, logs)
+			if !debug {
+				if len(records) != 0 {
+					t.Fatalf("clean refresh logged at default INFO level: %+v", records)
+				}
+			} else if len(records) != 1 || records[0]["level"] != "DEBUG" || records[0]["msg"] != "refresh succeeded" || records[0]["nodes"] != float64(0) || records[0]["skipped_nodes"] != float64(0) {
+				t.Fatalf("debug logs = %+v", records)
+			}
+		})
 	}
 }
 

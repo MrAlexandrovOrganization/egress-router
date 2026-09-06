@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -416,17 +416,19 @@ func (m *Manager) update(add *Subscription) (result map[string]any, err error) {
 		if err != nil {
 			// Only fixed stage messages and parser errors may leave this boundary.
 			m.lastError = err.Error()
-			log.Printf("refresh failed: %s", m.lastError)
+			slog.Error("refresh failed", "error", m.lastError)
 		} else {
 			m.lastError = ""
 			m.lastSuccess = time.Now().UTC()
 			m.nodes = result["nodes"].(int)
 			m.skippedNodes = result["skipped_nodes"].(int)
 			if m.skippedNodes > 0 {
-				log.Printf("refresh succeeded with %d skipped nodes", m.skippedNodes)
+				slog.Warn("refresh succeeded with skipped nodes", "nodes", m.nodes, "skipped_nodes", m.skippedNodes)
 				for _, warning := range result["errors"].([]string) {
-					log.Printf("refresh warning: %s", warning)
+					slog.Warn("refresh warning", "error", warning)
 				}
+			} else {
+				slog.Debug("refresh succeeded", "nodes", m.nodes, "skipped_nodes", 0)
 			}
 		}
 	}()
@@ -709,13 +711,19 @@ func (m *Manager) run() error {
 }
 
 func main() {
+	var level slog.Level
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: &level})))
+	if err := level.UnmarshalText([]byte(env("LOG_LEVEL", "INFO"))); err != nil {
+		slog.Error("configuration failed", "error", "invalid LOG_LEVEL")
+		os.Exit(1)
+	}
 	m, err := newManager()
 	if err != nil {
-		fmt.Printf("configuration failed: %v\n", err)
+		slog.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
 	if err := m.run(); err != nil {
-		fmt.Printf("startup failed: %v\n", err)
+		slog.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
 }
