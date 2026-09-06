@@ -27,9 +27,11 @@ status:
 
 fmt:
 	gofmt -w subscription-manager/*.go
+	$(MAKE) -C catalog-client fmt
 
 fmt-check:
-	@files="$$(gofmt -l subscription-manager/*.go)"; test -z "$$files"
+	@files="$$(gofmt -l subscription-manager/*.go)" || exit; test -z "$$files"
+	$(MAKE) -C catalog-client fmt-check
 
 shell-check:
 	sh -n telemt-egress-tproxy.sh
@@ -38,6 +40,7 @@ shell-check:
 config-check:
 	docker run --rm -i -v "$(PWD)/config.json.example:/config.json:ro" $(SING_BOX_IMAGE) check -c /config.json
 	SING_BOX_TEST_IMAGE='$(SING_BOX_IMAGE)' go -C subscription-manager test -run TestIntegration -v ./...
+	SING_BOX_TEST_IMAGE='$(SING_BOX_IMAGE)' go -C catalog-client test -timeout 120s -run TestIntegration -v ./...
 
 compose-check:
 	$(COMPOSE) config --quiet
@@ -45,6 +48,11 @@ compose-check:
 test:
 	go -C subscription-manager test -race -cover ./...
 	go -C subscription-manager vet ./...
+	$(MAKE) -C catalog-client test lint
+
+.PHONY: shadow-check
+shadow-check:
+	$(MAKE) -C catalog-client check build
 
 check: fmt-check shell-check config-check compose-check test
 

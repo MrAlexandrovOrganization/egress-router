@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package catalog.v1;
+
+option go_package = "github.com/MrAlexandrovOrganization/subscription-catalog/internal/gen/catalogv1;catalogv1";
+
+// CatalogService manages sources and validated node snapshots. Source URLs,
+// imported content and node URIs may contain credentials: never log them or
+// expose them in errors. Unix timestamps are UTC seconds; zero means unknown.
+service CatalogService {
+  // AddSource registers a source; retries with the same key must not duplicate it.
+  rpc AddSource(AddSourceRequest) returns (Source);
+  // ListSources lists source metadata without secret source URLs.
+  rpc ListSources(Empty) returns (ListSourcesResponse);
+  // ImportNodes starts an asynchronous import of secret-bearing content.
+  rpc ImportNodes(ImportNodesRequest) returns (Operation);
+  // RefreshSource starts an asynchronous fetch of the registered source.
+  rpc RefreshSource(RefreshSourceRequest) returns (Operation);
+  // GetOperation polls an import or refresh operation.
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  // GetSnapshot returns secret-bearing nodes matching the requested profile.
+  rpc GetSnapshot(GetSnapshotRequest) returns (Snapshot);
+  // SetSourceEnabled changes whether a source participates in catalog updates.
+  rpc SetSourceEnabled(SetSourceEnabledRequest) returns (Source);
+}
+
+// Empty is the catalog-local empty request.
+message Empty {}
+
+// AddSourceRequest registers a named subscription URL.
+message AddSourceRequest {
+  string name = 1; // Human-readable source name.
+  string url = 2; // Secret-bearing subscription URL; never log it.
+  string idempotency_key = 3; // Opaque retry key, scoped to this mutation.
+}
+
+// Source contains non-secret source metadata, never the original URL.
+message Source {
+  string id = 1; // Opaque source identifier.
+  string name = 2; // Human-readable source name.
+  string status = 3; // Allowed values: enabled, disabled.
+  uint32 node_count = 4; // Number of nodes associated with the source.
+  int64 last_fetch_unix = 5; // Last completed fetch time in Unix seconds.
+  string last_error_code = 6; // Stable, sanitized code; empty if no error.
+}
+
+// ListSourcesResponse contains the known sources.
+message ListSourcesResponse {
+  repeated Source sources = 1; // Source metadata, without credentials.
+}
+
+// ImportNodesRequest supplies raw subscription content for asynchronous import.
+message ImportNodesRequest {
+  string name = 1; // Human-readable import name.
+  string content = 2; // Secret-bearing content; never log or echo it in errors.
+  string idempotency_key = 3; // Opaque retry key, scoped to this mutation.
+}
+
+// RefreshSourceRequest refreshes a previously registered source.
+message RefreshSourceRequest {
+  string source_id = 1; // Opaque source identifier.
+  string idempotency_key = 2; // Opaque retry key, scoped to this mutation.
+}
+
+// GetOperationRequest identifies an asynchronous operation.
+message GetOperationRequest {
+  string id = 1; // Opaque operation identifier.
+}
+
+// Operation describes asynchronous work; codes must never contain credentials.
+message Operation {
+  string id = 1; // Opaque operation identifier.
+  string state = 2; // Allowed values: queued, running, succeeded, failed.
+  string message_code = 3; // Stable, sanitized status or error code.
+  uint32 total = 4; // Total work items known so far.
+  uint32 completed = 5; // Completed work items, not greater than total.
+}
+
+// GetSnapshotRequest selects a profile and bounds snapshot size and node age.
+message GetSnapshotRequest {
+  string profile = 1; // Named selection profile.
+  uint32 limit = 2; // Maximum nodes; zero uses the service default.
+  int64 max_age_seconds = 3; // Nonnegative maximum check age; zero uses the default.
+}
+
+// Snapshot is a time-bounded selection of secret-bearing nodes.
+message Snapshot {
+  string id = 1; // Opaque snapshot identifier.
+  string profile = 2; // Applied selection profile.
+  int64 created_at_unix = 3; // Creation time in Unix seconds.
+  int64 valid_until_unix = 4; // Expiration time in Unix seconds.
+  repeated Node nodes = 5; // Secret-bearing nodes; never log the payload.
+}
+
+// Node uses uri as the authoritative wire representation, preserving all
+// supported parameters. Metadata is descriptive, not independently trusted;
+// consumers must parse and validate uri rather than reconstruct it from fields.
+message Node {
+  string id = 1; // Opaque node identifier.
+  string uri = 2; // Authoritative secret-bearing URI; preserve all supported params.
+  string protocol = 3; // Descriptive protocol metadata only.
+  string server = 4; // Descriptive server metadata only.
+  uint32 port = 5; // Descriptive port metadata only; valid ports are 1..65535.
+  int64 last_success_unix = 6; // Last successful check time in Unix seconds.
+  uint32 schema_version = 7; // Node representation version; initial version is 1.
+}
+
+// SetSourceEnabledRequest explicitly sets the source's enabled state.
+message SetSourceEnabledRequest {
+  string id = 1; // Opaque source identifier.
+  bool enabled = 2; // True enables the source; false disables it.
+}

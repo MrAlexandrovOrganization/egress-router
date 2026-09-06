@@ -177,3 +177,11 @@ Ignored config, state and runtime files remain in place; obstructing untracked
 files cause checkout to fail rather than being removed. The deployment checkout
 will remain detached. Pending GitHub concurrency jobs may be superseded; this is
 not a guarantee that every push gets deployed.
+
+## Optional Catalog Shadow
+
+An isolated, opt-in catalog consumer is available in
+[`catalog-client/`](catalog-client/README.md). `make shadow-check` runs its local
+checks and native build. It writes only a separately validated shadow candidate;
+it is not invoked by deployment, Compose, refresh, or subscription-manager and
+does not activate configs. See its README for the staged read-only migration.

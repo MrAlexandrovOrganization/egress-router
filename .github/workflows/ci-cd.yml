@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, subscription-catalog-shadow]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,9 +23,13 @@ jobs:
         with:
           go-version-file: subscription-manager/go.mod
           cache: true
-          cache-dependency-path: subscription-manager/go.mod
+          cache-dependency-path: |
+            subscription-manager/go.mod
+            catalog-client/go.sum
       - name: Run checks
         run: make check
+      - name: Build standalone shadow CLI (native)
+        run: make -C catalog-client build
       - name: Isolated deployment smoke test
         run: make deployment-smoke
 
