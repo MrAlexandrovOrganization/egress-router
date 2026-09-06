@@ -46,6 +46,7 @@ compose-check:
 	$(COMPOSE) config --quiet
 
 test:
+	python3 -m unittest discover -s scripts -p 'test_*.py'
 	go -C subscription-manager test -race -cover ./...
 	go -C subscription-manager vet ./...
 	$(MAKE) -C catalog-client test lint

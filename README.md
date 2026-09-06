@@ -185,3 +185,81 @@ An isolated, opt-in catalog consumer is available in
 checks and native build. It writes only a separately validated shadow candidate;
 it is not invoked by deployment, Compose, refresh, or subscription-manager and
 does not activate configs. See its README for the staged read-only migration.
+
+## Pre-Deployment Backup and Recovery
+
+**Before merging to main or allowing its deployment**, snapshot the current Linux
+host. Run this manually on that host, using the reviewed script (it need not be
+inside the deployed checkout). Python 3.9+, root, Git, Docker and an existing
+project `.deploy.lock` are required. Do not run deployment or direct API writes
+concurrently. The script never stops or pauses the router.
+
+```bash
+sudo python3 scripts/snapshot-router.py \
+  --project /home/maxim/projects/infra/network/egress-router \
+  --destination /var/backups/egress-router
+```
+
+Those are also the defaults. The destination must be root-owned `0700`; a new
+destination is created privately. Project/destination symlink components and
+destinations inside the project are rejected. Each run creates a unique dated
+`0700` directory with `0600` artifacts. Treat **all artifacts as credentials**:
+never commit, publish, attach to CI, or print their contents. Transfer an encrypted
+copy to separate protected storage if protection against host/disk loss is needed.
+
+The snapshot holds the existing deployment flock throughout. Before copying it
+records Git HEAD/refs/status/file index and a `git bundle --all`, exact container
+inspect JSON and immutable image IDs. Git reads run as the checkout owner with
+optional index locks disabled. It briefly pauses subscription-manager only if
+running and not already paused, copies the router's actually mounted config via
+Docker (which may differ from the host file's inode), and archives the complete
+worktree except `.git` and `.deploy.lock`. Ignored `.env`, base config, runtime,
+new state and legacy subscriptions are included. Internal symlinks are archived
+as links, not followed. No application-level transaction guarantee is implied.
+
+The manager is unpaused in `finally`, including when pause/copy/archive commands
+fail, **before** saving both images by immutable ID (deduplicated) to `images.tar`.
+An already stopped/paused manager is left unchanged. Unpause failure prevents a
+successful snapshot. SIGKILL, power loss or a failed Docker daemon can still leave
+it paused: inspect its state manually after interruption. Partial backups are
+retained, never silently removed. Free-space preflight requires estimated worktree
+tar size plus inspected image sizes plus 512 MiB headroom; concurrent disk use or
+archive overhead can still cause failure.
+
+Installed tproxy executable, systemd unit and defaults are copied if present;
+only `ip telemt_tproxy` is queried via nft JSON, never the full host ruleset.
+Failed/unavailable nft queries are recorded as unknown existence, not definitive
+absence. Host artifacts are **not automatically reapplied**. External mounts,
+Docker writable layers, systemd enablement, other services and remote/unreachable
+Git objects are outside scope.
+
+Require `COMPLETE` before proceeding with merge/deployment. It is written only
+after reading the tar archives, verifying the Git bundle, parsing mounted config
+JSON and generating streaming SHA256 hashes of artifacts. `SHA256SUMS` excludes
+itself and the final marker. These are structural checks, **not** sing-box config
+validation, live HTTPS verification or a full restore drill. Child output stays
+in protected files; stderr is suppressed and failures do not print secret data.
+
+Recovery checklist (full operator instructions are generated as `RESTORE.md`):
+
+1. Take a fresh snapshot first; privately verify `SHA256SUMS` and `COMPLETE`.
+2. Hold the original checkout's `.deploy.lock` and stop the writer deliberately.
+3. Extract the worktree into a separate protected recovery root, load saved
+   images, and review recovered Compose binds, `.env`, ownership and host settings.
+4. Use `running-config.json` as authoritative; replace recovered
+   `runtime/active.json` safely and adjust legacy router binds if necessary.
+5. Validate with the saved local router image, then use recovered base Compose
+   plus `image-override.yaml` to recreate **only** the router, without build/pull.
+6. Check health, real HTTPS through the proxy and telemt routing. Keep the manager
+   stopped until its recovered state is inspected; restore original state only
+   deliberately. Review/reapply host systemd/nft settings separately if needed.
+
+Do not use destructive Git reset or run latest `make deploy`/`make refresh` during
+recovery: that can replace the configuration and state you are trying to restore.
+The script does not perform automatic rollback or change the main deployment flow.
+
+Local mocked tests (no Docker, SSH, production state or root paths accessed):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_snapshot_router.py' -v
+```

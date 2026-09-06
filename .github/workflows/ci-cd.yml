@@ -66,6 +66,12 @@ jobs:
             git fetch origin main
             sha='${{ github.sha }}'
             test "$(git rev-parse --verify "$sha^{commit}")" = "$sha"
-            git checkout --detach "$sha"
+            if [ "$(git rev-parse origin/main)" != "$sha" ]; then
+              printf '%s\n' 'Skipping deployment: origin/main no longer matches the tested commit.'
+              exit 0
+            fi
+            git switch main
+            git merge --ff-only "$sha"
+            test "$(git rev-parse HEAD)" = "$sha"
             DEPLOY_LOCKED=1 make deploy
             make status
