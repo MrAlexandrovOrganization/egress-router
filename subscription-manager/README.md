@@ -26,10 +26,14 @@ State defaults to `/data/state/subscriptions.json` in the writable directory bin
 (default 1000:1000) and migrates the legacy local `subscriptions.json` only if the
 new file is absent. The legacy file is neither logged nor removed.
 
-Every refresh validates the complete result. ANY invalid node, including unsupported
-VMess, fails the whole refresh with HTTP 400 and preserves the generated config.
+Every refresh validates the complete result. Blank lines and `#` comments are
+ignored; unsupported or malformed nodes (including VMess and TUIC) are skipped.
+Successful responses include up to 20 sanitized warnings in `errors` and the total
+`skipped_nodes`. A failed fetch, a provider with no usable nodes, or final validation
+failure rejects the whole refresh with HTTP 400 and preserves the generated config.
 `GET /health` is 503 before the first successful build and after a failed attempt;
-the Alpine container probes it using localhost `wget`.
+the Alpine container probes it using localhost `wget`. Success with warnings stays
+ready; health includes the last successful refresh's `skipped_nodes` count.
 
 Periodic refresh writes `/data/runtime/config.json` but does not apply it. The
 router mounts a separate `/data/runtime/active.json` host snapshot. Manual

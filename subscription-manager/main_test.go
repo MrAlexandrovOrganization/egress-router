@@ -31,6 +31,22 @@ func TestDecodeBody(t *testing.T) {
 	}
 }
 
+func TestDecodeBodyComments(t *testing.T) {
+	const node = "trojan://secret@example.test:443#keep-fragment"
+	for _, plain := range []string{"# metadata https://example.test\n  # another comment\n\n" + node + "\n# footer", "# metadata only\n  # comment\n", ""} {
+		for _, body := range []string{plain, base64.StdEncoding.EncodeToString([]byte(plain)), "# outer metadata https://example.test\n" + base64.StdEncoding.EncodeToString([]byte(plain))} {
+			got := decodeBody([]byte(body))
+			if strings.Contains(plain, node) {
+				if len(got) != 1 || got[0] != node {
+					t.Fatalf("decoded nodes = %#v", got)
+				}
+			} else if len(got) != 0 {
+				t.Fatalf("decoded empty provider = %#v", got)
+			}
+		}
+	}
+}
+
 func fixtureManager(t *testing.T, client *http.Client) *Manager {
 	t.Helper()
 	dir := t.TempDir()
@@ -49,7 +65,7 @@ func postSubscription(m *Manager, sub Subscription) *httptest.ResponseRecorder {
 }
 
 func TestFailedRefreshPreservesConfig(t *testing.T) {
-	for _, failure := range []string{"http", "empty", "garbage", "mixed", "base64", "port", "transport", "validation"} {
+	for _, failure := range []string{"http", "empty", "comments", "comments-base64", "garbage", "all-invalid", "base64", "port", "transport", "validation"} {
 		t.Run(failure, func(t *testing.T) {
 			var mu sync.Mutex
 			bad := false
@@ -64,12 +80,16 @@ func TestFailedRefreshPreservesConfig(t *testing.T) {
 				case "http":
 					w.WriteHeader(503)
 				case "empty":
+				case "comments":
+					fmt.Fprint(w, "# metadata https://example.test\n # comment")
+				case "comments-base64":
+					fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte("# metadata\n # comment")))
 				case "garbage":
 					fmt.Fprint(w, "not a subscription")
-				case "mixed":
-					fmt.Fprint(w, "trojan://secret@example.test:443\nunsupported://credential@example.test:443")
+				case "all-invalid":
+					fmt.Fprint(w, "tuic://credential@example.test:443\ninvalid")
 				case "base64":
-					fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte("trojan://secret@example.test:443\ninvalid")))
+					fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte("tuic://credential@example.test:443\ninvalid")))
 				case "port":
 					fmt.Fprint(w, "trojan://secret@example.test:65536")
 				case "transport":
@@ -113,6 +133,19 @@ func TestFailedRefreshPreservesConfig(t *testing.T) {
 
 func TestInvalidAdditionDoesNotMutateState(t *testing.T) {
 	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/http":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		case "/empty":
+			return
+		case "/comments":
+			fmt.Fprint(w, "# metadata only")
+			return
+		case "/all-invalid":
+			fmt.Fprint(w, "tuic://secret@example.test:443\ninvalid")
+			return
+		}
 		if r.URL.Path == "/bad" {
 			fmt.Fprint(w, "invalid")
 			return
@@ -126,7 +159,7 @@ func TestInvalidAdditionDoesNotMutateState(t *testing.T) {
 	}
 	before, _ := os.ReadFile(m.state)
 	config, _ := os.ReadFile(m.output)
-	for _, sub := range []Subscription{{"bad", s.URL + "/bad"}, {"a b", s.URL}, {"bad", "http://example.test"}} {
+	for _, sub := range []Subscription{{"bad", s.URL + "/bad"}, {"bad", s.URL + "/http"}, {"bad", s.URL + "/empty"}, {"bad", s.URL + "/comments"}, {"bad", s.URL + "/all-invalid"}, {"a b", s.URL}, {"bad", "http://example.test"}} {
 		if w := postSubscription(m, sub); w.Code < 400 {
 			t.Fatalf("accepted %#v", sub)
 		}
@@ -146,6 +179,88 @@ func TestInvalidAdditionDoesNotMutateState(t *testing.T) {
 	after, _ := os.ReadFile(m.state)
 	if !bytes.Equal(before, after) {
 		t.Fatal("validation failure mutated state")
+	}
+	after, _ = os.ReadFile(m.output)
+	if !bytes.Equal(config, after) {
+		t.Fatal("validation failure mutated config")
+	}
+}
+
+func TestMixedSubscriptionsPublishWithWarnings(t *testing.T) {
+	for _, encoded := range []bool{false, true} {
+		for _, rejected := range []int{3, 25} {
+			t.Run(fmt.Sprintf("base64=%t/skipped=%d", encoded, rejected), func(t *testing.T) {
+				body := "# provider metadata\n  # https://example.test\n" + strings.Repeat("tuic://credential-secret@example.test:443\n", rejected-1) + "trojan://credential-secret@example.test:65536\n" + "trojan://secret@example.test:443?sni=tls.test\n"
+				if encoded {
+					body = base64.StdEncoding.EncodeToString([]byte(body))
+				}
+				s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body) }))
+				defer s.Close()
+				m := fixtureManager(t, s.Client())
+				w := postSubscription(m, Subscription{"fixture", s.URL})
+				if w.Code != http.StatusOK {
+					t.Fatalf("addition = %d %s", w.Code, w.Body)
+				}
+				// A second identical feed must be valid even though its nodes deduplicate.
+				w = postSubscription(m, Subscription{"duplicate", s.URL})
+				if w.Code != http.StatusOK {
+					t.Fatalf("duplicate addition = %d %s", w.Code, w.Body)
+				}
+				w = httptest.NewRecorder()
+				m.handler(w, httptest.NewRequest(http.MethodPost, "/refresh", nil))
+				if w.Code != http.StatusOK {
+					t.Fatalf("refresh = %d %s", w.Code, w.Body)
+				}
+				var result struct {
+					Nodes        int      `json:"nodes"`
+					Errors       []string `json:"errors"`
+					SkippedNodes int      `json:"skipped_nodes"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				wantWarnings := rejected * 2
+				if wantWarnings > 20 {
+					wantWarnings = 20
+				}
+				if result.Nodes != 1 || result.SkippedNodes != rejected*2 || len(result.Errors) != wantWarnings {
+					t.Fatalf("result = %+v", result)
+				}
+				if strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "example.test") {
+					t.Fatalf("unsanitized warnings: %s", w.Body)
+				}
+				data, err := os.ReadFile(m.output)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Contains(data, []byte(`"server_name": "tls.test"`)) || bytes.Contains(data, []byte("tuic")) {
+					t.Fatal("supported TLS node not published correctly")
+				}
+				w = httptest.NewRecorder()
+				m.handler(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+				var health struct {
+					OK           bool   `json:"ok"`
+					SkippedNodes int    `json:"skipped_nodes"`
+					Error        string `json:"error"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &health); err != nil {
+					t.Fatal(err)
+				}
+				if w.Code != http.StatusOK || !health.OK || health.Error != "" || health.SkippedNodes != rejected*2 {
+					t.Fatalf("health = %d %+v", w.Code, health)
+				}
+				if err := writeJSONAtomic(m.state, State{Subscriptions: []Subscription{}}); err != nil {
+					t.Fatal(err)
+				}
+				resultMap, err := m.build()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if resultMap["skipped_nodes"] != 0 || len(resultMap["errors"].([]string)) != 0 || m.skippedNodes != 0 {
+					t.Fatalf("stale warnings: %+v", resultMap)
+				}
+			})
+		}
 	}
 }
 

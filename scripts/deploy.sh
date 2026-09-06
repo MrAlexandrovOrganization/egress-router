@@ -16,6 +16,13 @@ sudo bash scripts/init.sh "$EGRESS_UID" "$EGRESS_GID"
 [[ $action != init ]] || exit 0
 compose=(docker compose -p egress-router -f docker-compose.yaml)
 api=http://127.0.0.1:19091
+generation_failed() {
+    printf 'Generation failed; active config unchanged\n' >&2
+    # Health contains only fixed diagnostics and counters, never provider URLs.
+    curl --silent --noproxy '*' --max-time 5 "$api/health" |
+        jq -c '{ok,error,nodes,skipped_nodes,last_attempt,last_success}' >&2 || true
+    exit 1
+}
 smoke_url=${SMOKE_URL:-https://cp.cloudflare.com/generate_204}
 proxy=${SMOKE_PROXY:-http://127.0.0.1:10880}
 [[ $smoke_url == https://* && $proxy == http://127.0.0.1:* ]] || {
@@ -62,11 +69,11 @@ else
         [[ -n ${NAME:-} && -n ${URL:-} ]] || { printf 'Usage: make add NAME=name URL=https://...\n' >&2; exit 2; }
         jq -n '{name:env.NAME,url:env.URL}' | curl --silent --noproxy '*' --fail --output /dev/null \
             --max-time 300 -X POST -H 'Content-Type: application/json' --data-binary @- "$api/subscriptions" || {
-            printf 'Generation failed; active config unchanged\n' >&2; exit 1;
+            generation_failed
         }
     else
         curl --silent --noproxy '*' --fail --output /dev/null --max-time 300 -X POST "$api/refresh" || {
-            printf 'Generation failed; active config unchanged\n' >&2; exit 1;
+            generation_failed
         }
     fi
     snapshot runtime/active.json runtime/previous.json

@@ -35,19 +35,20 @@ type State struct {
 }
 
 type Manager struct {
-	base        string
-	output      string
-	state       string
-	interval    time.Duration
-	port        int
-	client      *http.Client
-	validate    func(string) error
-	mu          sync.Mutex
-	healthMu    sync.Mutex
-	lastAttempt time.Time
-	lastSuccess time.Time
-	nodes       int
-	lastError   string
+	base         string
+	output       string
+	state        string
+	interval     time.Duration
+	port         int
+	client       *http.Client
+	validate     func(string) error
+	mu           sync.Mutex
+	healthMu     sync.Mutex
+	lastAttempt  time.Time
+	lastSuccess  time.Time
+	nodes        int
+	skippedNodes int
+	lastError    string
 }
 
 func env(name, fallback string) string {
@@ -137,10 +138,11 @@ func decodeBody(body []byte) []string {
 	var found []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if line != "" && !strings.HasPrefix(line, "#") {
 			found = append(found, line)
 		}
 	}
+	text = strings.Join(found, "\n")
 	if strings.Contains(text, "://") {
 		return found
 	}
@@ -151,7 +153,7 @@ func decodeBody(body []byte) []string {
 	}
 	var result []string
 	for _, line := range strings.Split(string(decoded), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
 			result = append(result, line)
 		}
 	}
@@ -419,6 +421,13 @@ func (m *Manager) update(add *Subscription) (result map[string]any, err error) {
 			m.lastError = ""
 			m.lastSuccess = time.Now().UTC()
 			m.nodes = result["nodes"].(int)
+			m.skippedNodes = result["skipped_nodes"].(int)
+			if m.skippedNodes > 0 {
+				log.Printf("refresh succeeded with %d skipped nodes", m.skippedNodes)
+				for _, warning := range result["errors"].([]string) {
+					log.Printf("refresh warning: %s", warning)
+				}
+			}
 		}
 	}()
 	state, err := readState(m.state)
@@ -464,6 +473,8 @@ func (m *Manager) buildState(state, previous State, persist bool) (map[string]an
 		tags[tag] = true
 	}
 	var outbounds []map[string]any
+	warnings := []string{}
+	skippedNodes := 0
 	seen := map[string]bool{}
 	names := map[string]bool{}
 	for _, subscription := range state.Subscriptions {
@@ -482,12 +493,19 @@ func (m *Manager) buildState(state, previous State, persist bool) (map[string]an
 		if len(uris) == 0 {
 			return nil, fmt.Errorf("provider %d: empty or unsupported subscription format", providerIndex+1)
 		}
+		parsedNodes := 0
 		for index, rawURI := range uris {
 			tag := "sub-" + unsafeName.ReplaceAllString(subscription.Name, "-") + "-" + nodeName(fragment(rawURI), index+1)
 			item, err := parseURI(rawURI, tag)
 			if err != nil {
-				return nil, fmt.Errorf("provider %d node %d: %s", providerIndex+1, index+1, err)
+				skippedNodes++
+				if len(warnings) < 20 {
+					warnings = append(warnings, fmt.Sprintf("provider %d node %d: %s", providerIndex+1, index+1, err))
+				}
+				continue
 			}
+			// Count before deduplication: a valid provider may repeat another feed.
+			parsedNodes++
 			if tags[tag] {
 				return nil, errors.New("outbound tag collision")
 			}
@@ -504,6 +522,9 @@ func (m *Manager) buildState(state, previous State, persist bool) (map[string]an
 				seen[fingerprint] = true
 				outbounds = append(outbounds, item)
 			}
+		}
+		if parsedNodes == 0 {
+			return nil, fmt.Errorf("provider %d: no successfully parsed nodes", providerIndex+1)
 		}
 	}
 	generatedTags := make([]any, len(outbounds))
@@ -564,7 +585,7 @@ func (m *Manager) buildState(state, previous State, persist bool) (map[string]an
 		}
 		return nil, errors.New("publish config failed")
 	}
-	return map[string]any{"nodes": len(outbounds), "errors": []string{}}, nil
+	return map[string]any{"nodes": len(outbounds), "errors": warnings, "skipped_nodes": skippedNodes}, nil
 }
 
 func fragment(raw string) string {
@@ -595,7 +616,7 @@ func (m *Manager) handler(w http.ResponseWriter, request *http.Request) {
 		if !ready {
 			status = http.StatusServiceUnavailable
 		}
-		m.reply(w, status, map[string]any{"ok": ready, "last_attempt": m.lastAttempt, "last_success": m.lastSuccess, "nodes": m.nodes, "error": m.lastError})
+		m.reply(w, status, map[string]any{"ok": ready, "last_attempt": m.lastAttempt, "last_success": m.lastSuccess, "nodes": m.nodes, "skipped_nodes": m.skippedNodes, "error": m.lastError})
 	case request.Method == http.MethodGet && request.URL.Path == "/subscriptions":
 		m.mu.Lock()
 		state, err := readState(m.state)

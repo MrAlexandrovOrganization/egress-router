@@ -59,8 +59,12 @@ four minutes, then requests a generation. `make add` and `make refresh` use the
 same activation path against the running manager. A health response of 503 is
 accepted for HTTP readiness so a corrective operation can recover a failed build;
 it is not treated as a successful generation. POST must succeed first (five-minute
-client timeout). ANY invalid node fails the entire refresh with HTTP 400, including
-unsupported VMess nodes. The previous generated config is preserved on failure.
+client timeout). Metadata comments are ignored. Unsupported or malformed nodes
+(including VMess and TUIC) are skipped with sanitized warnings and a
+`skipped_nodes` counter. A failed fetch or a provider with no usable nodes rejects
+the entire refresh with HTTP 400. The previous generated config is preserved on
+failure, including validation failure. Duplicate usable nodes across providers
+do not make a provider empty.
 `/health` returns 503 until a successful build and again after a failed attempt.
 
 All supported manual add/refresh/deploy/rollback commands hold a host `flock` on
