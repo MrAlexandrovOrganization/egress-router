@@ -1,13 +1,14 @@
 COMPOSE := docker compose -p egress-router -f ../docker-compose.yaml
 API := http://127.0.0.1:19091
+export NAME URL
 
 .PHONY: init up down status logs fmt fmt-check test refresh add list restart-egress
 
 init:
-	@test -e subscriptions.json || cp subscriptions.json.example subscriptions.json
+	@$(MAKE) --no-print-directory -C .. init
 
-up: init
-	$(COMPOSE) up -d --build
+up:
+	@$(MAKE) --no-print-directory -C .. deploy
 
 down:
 	$(COMPOSE) down
@@ -27,18 +28,15 @@ test:
 logs:
 	$(COMPOSE) logs -f subscription-manager egress-router
 
+list: SHELL := /bin/bash -o pipefail
 list:
-	curl -fsS $(API)/subscriptions
+	@curl --noproxy '*' -fsS $(API)/subscriptions | jq '[.subscriptions[] | {name}]'
 
 refresh:
-	curl -fsS -X POST $(API)/refresh
-	$(MAKE) restart-egress
+	@$(MAKE) --no-print-directory -C .. refresh
 
 add:
-	@test -n "$(NAME)" || (echo "usage: make add NAME=name URL=https://..." >&2; exit 2)
-	@test -n "$(URL)" || (echo "usage: make add NAME=name URL=https://..." >&2; exit 2)
-	curl -fsS -X POST $(API)/subscriptions -H 'Content-Type: application/json' --data "$$(jq -n --arg name '$(NAME)' --arg url '$(URL)' '{name:$$name,url:$$url}')"
-	$(MAKE) restart-egress
+	@$(MAKE) --no-print-directory -C .. add
 
 restart-egress:
-	$(COMPOSE) up -d --no-deps --force-recreate egress-router
+	@$(MAKE) --no-print-directory -C .. refresh

@@ -2,3 +2,6 @@ config.json
 runtime/*
 !runtime/.gitkeep
 .env
+state/
+.deploy.lock
+subscription-manager/subscriptions.json

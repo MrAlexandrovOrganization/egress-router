@@ -1,20 +1,25 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -30,14 +35,19 @@ type State struct {
 }
 
 type Manager struct {
-	base     string
-	output   string
-	state    string
-	interval time.Duration
-	port     int
-	client   *http.Client
-	validate func(string) error
-	mu       sync.Mutex
+	base        string
+	output      string
+	state       string
+	interval    time.Duration
+	port        int
+	client      *http.Client
+	validate    func(string) error
+	mu          sync.Mutex
+	healthMu    sync.Mutex
+	lastAttempt time.Time
+	lastSuccess time.Time
+	nodes       int
+	lastError   string
 }
 
 func env(name, fallback string) string {
@@ -49,7 +59,7 @@ func env(name, fallback string) string {
 
 func newManager() (*Manager, error) {
 	interval, err := strconv.Atoi(env("REFRESH_INTERVAL", "3600"))
-	if err != nil || interval < 0 {
+	if err != nil || interval <= 0 || int64(interval) > int64((1<<63-1)/time.Second) {
 		return nil, fmt.Errorf("invalid REFRESH_INTERVAL")
 	}
 	port, err := strconv.Atoi(env("PORT", "19091"))
@@ -59,13 +69,23 @@ func newManager() (*Manager, error) {
 	m := &Manager{
 		base:     env("BASE_CONFIG", "/data/base-config.json"),
 		output:   env("OUTPUT_CONFIG", "/data/runtime/config.json"),
-		state:    env("STATE_FILE", "/data/subscriptions.json"),
+		state:    env("STATE_FILE", "/data/state/subscriptions.json"),
 		interval: time.Duration(interval) * time.Second,
 		port:     port,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client:   &http.Client{Timeout: 30 * time.Second, CheckRedirect: secureRedirect},
 	}
 	m.validate = validateConfig
 	return m, nil
+}
+
+func secureRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return errors.New("redirect requires HTTPS")
+	}
+	if len(via) >= 10 {
+		return errors.New("too many redirects")
+	}
+	return nil
 }
 
 func readState(path string) (State, error) {
@@ -117,11 +137,11 @@ func decodeBody(body []byte) []string {
 	var found []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "vless://") || strings.HasPrefix(line, "vmess://") || strings.HasPrefix(line, "trojan://") || strings.HasPrefix(line, "ss://") || strings.HasPrefix(line, "hy2://") || strings.HasPrefix(line, "hysteria2://") {
+		if line != "" {
 			found = append(found, line)
 		}
 	}
-	if len(found) > 0 {
+	if strings.Contains(text, "://") {
 		return found
 	}
 	compact := strings.Join(strings.Fields(text), "")
@@ -180,6 +200,9 @@ func tlsFrom(query url.Values) map[string]any {
 	if sni := query.Get("sni"); sni != "" {
 		result["server_name"] = sni
 	}
+	if alpn := query.Get("alpn"); alpn != "" {
+		result["alpn"] = strings.Split(alpn, ",")
+	}
 	if queryBool(query, "insecure", "allowInsecure") {
 		result["insecure"] = true
 	}
@@ -227,25 +250,50 @@ func transportFrom(query url.Values) (map[string]any, error) {
 			transport["service_name"] = name
 		}
 		return transport, nil
-	default:
+	case "", "tcp":
 		return nil, nil
+	default:
+		return nil, errors.New("unsupported transport")
 	}
 }
 
 func parseURI(raw, tag string) (map[string]any, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid node URI")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "vless", "trojan", "hy2", "hysteria2", "ss":
+	default:
+		return nil, errors.New("unsupported node format (including VMess, Clash and sing-box JSON)")
 	}
 	if parsed.Hostname() == "" || parsed.Port() == "" {
 		return nil, errors.New("missing server or port")
 	}
-	query := parsed.Query()
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return nil, errors.New("invalid node query")
+	}
+	if security := query.Get("security"); security != "" && security != "none" && security != "tls" && security != "reality" {
+		return nil, errors.New("unsupported TLS security")
+	}
+	if query.Get("security") == "reality" && query.Get("pbk") == "" {
+		return nil, errors.New("reality requires public key")
+	}
+	if query.Get("plugin") != "" || query.Get("network") != "" {
+		return nil, errors.New("unsupported plugin or network option")
+	}
 	server := parsed.Hostname()
-	port, _ := strconv.Atoi(parsed.Port())
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return nil, errors.New("invalid server port")
+	}
 	user := ""
 	if parsed.User != nil {
 		user = parsed.User.Username()
+	}
+	if user == "" {
+		return nil, errors.New("missing node credentials")
 	}
 	item := map[string]any{"tag": tag, "server": server, "server_port": port}
 	switch strings.ToLower(parsed.Scheme) {
@@ -260,13 +308,25 @@ func parseURI(raw, tag string) (map[string]any, error) {
 		}
 	case "trojan":
 		item["type"], item["password"] = "trojan", user
+		if password, ok := parsed.User.Password(); ok {
+			item["password"] = user + ":" + password
+		}
 	case "hy2", "hysteria2":
 		item["type"], item["password"] = "hysteria2", user
+		if password, ok := parsed.User.Password(); ok {
+			item["password"] = user + ":" + password
+		}
+		if query.Get("obfs") != "" && (query.Get("obfs") != "salamander" || query.Get("obfs-password") == "") {
+			return nil, errors.New("unsupported or incomplete hysteria2 obfuscation")
+		}
 		if query.Get("obfs") == "salamander" && query.Get("obfs-password") != "" {
 			item["obfs"] = map[string]any{"type": "salamander", "password": query.Get("obfs-password")}
 		}
 	case "ss":
 		userinfo := user
+		if password, ok := parsed.User.Password(); ok {
+			userinfo = user + ":" + password
+		}
 		if !strings.Contains(userinfo, ":") {
 			decoded, err := decodeBase64(userinfo)
 			if err != nil {
@@ -283,14 +343,23 @@ func parseURI(raw, tag string) (map[string]any, error) {
 	default:
 		return nil, errors.New("unsupported scheme")
 	}
+	if item["type"] == "trojan" || item["type"] == "hysteria2" {
+		if query.Get("security") == "" {
+			query.Set("security", "tls")
+		}
+		if query.Get("security") != "tls" {
+			return nil, errors.New("protocol requires TLS")
+		}
+	}
 	if tls := tlsFrom(query); tls != nil {
 		item["tls"] = tls
-	} else if item["type"] == "trojan" || item["type"] == "hysteria2" {
-		item["tls"] = map[string]any{"enabled": true}
 	}
 	if transport, err := transportFrom(query); err != nil {
 		return nil, err
 	} else if transport != nil {
+		if item["type"] == "hysteria2" || item["type"] == "shadowsocks" {
+			return nil, errors.New("transport unsupported for protocol")
+		}
 		item["transport"] = transport
 	}
 	return item, nil
@@ -310,11 +379,18 @@ func (m *Manager) fetch(rawURL string) ([]byte, error) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, fmt.Errorf("subscription returned HTTP %d", response.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(response.Body, 16*1024*1024))
+	const limit = 16 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if len(body) > limit {
+		return nil, errors.New("subscription too large")
+	}
+	return body, err
 }
 
 func validateConfig(path string) error {
-	command := exec.Command("sing-box", "check", "-c", path)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "sing-box", "check", "-c", path)
 	if _, err := command.CombinedOutput(); err != nil {
 		return errors.New("sing-box config validation failed")
 	}
@@ -322,36 +398,100 @@ func validateConfig(path string) error {
 }
 
 func (m *Manager) build() (map[string]any, error) {
+	return m.update(nil)
+}
+
+// Hold the transaction lock through read, prospective validation and publication.
+func (m *Manager) update(add *Subscription) (result map[string]any, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.healthMu.Lock()
+	m.lastAttempt = time.Now().UTC()
+	m.healthMu.Unlock()
+	defer func() {
+		m.healthMu.Lock()
+		defer m.healthMu.Unlock()
+		if err != nil {
+			// Only fixed stage messages and parser errors may leave this boundary.
+			m.lastError = err.Error()
+			log.Printf("refresh failed: %s", m.lastError)
+		} else {
+			m.lastError = ""
+			m.lastSuccess = time.Now().UTC()
+			m.nodes = result["nodes"].(int)
+		}
+	}()
+	state, err := readState(m.state)
+	if err != nil {
+		return nil, errors.New("read state failed")
+	}
+	previous := State{Subscriptions: append([]Subscription(nil), state.Subscriptions...)}
+	if add != nil {
+		filtered := make([]Subscription, 0, len(state.Subscriptions)+1)
+		for _, sub := range state.Subscriptions {
+			if sub.Name != add.Name {
+				filtered = append(filtered, sub)
+			}
+		}
+		state.Subscriptions = append(filtered, *add)
+	}
+	return m.buildState(state, previous, add != nil)
+}
+
+func (m *Manager) buildState(state, previous State, persist bool) (map[string]any, error) {
 	baseData, err := os.ReadFile(m.base)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("read base config failed")
 	}
 	var base map[string]any
 	if err := json.Unmarshal(baseData, &base); err != nil {
-		return nil, fmt.Errorf("decode base config: %w", err)
+		return nil, errors.New("decode base config failed")
 	}
-	state, err := readState(m.state)
-	if err != nil {
-		return nil, err
+	values, ok := base["outbounds"].([]any)
+	if !ok {
+		return nil, errors.New("base outbounds must be an array")
+	}
+	tags := map[string]bool{}
+	for _, value := range values {
+		item, ok := value.(map[string]any)
+		if !ok {
+			return nil, errors.New("invalid base outbound")
+		}
+		tag, _ := item["tag"].(string)
+		if tag != "" && tags[tag] {
+			return nil, errors.New("base outbound tag collision")
+		}
+		tags[tag] = true
 	}
 	var outbounds []map[string]any
 	seen := map[string]bool{}
-	errorsFound := make([]string, 0)
+	names := map[string]bool{}
 	for _, subscription := range state.Subscriptions {
+		name := unsafeName.ReplaceAllString(subscription.Name, "-")
+		if subscription.Name == "" || names[name] {
+			return nil, errors.New("normalized subscription name collision or empty name")
+		}
+		names[name] = true
+	}
+	for providerIndex, subscription := range state.Subscriptions {
 		body, err := m.fetch(subscription.URL)
 		if err != nil {
-			errorsFound = append(errorsFound, fmt.Sprintf("%s: fetch failed", subscription.Name))
-			continue
+			return nil, fmt.Errorf("provider %d: fetch failed", providerIndex+1)
 		}
-		for index, rawURI := range decodeBody(body) {
+		uris := decodeBody(body)
+		if len(uris) == 0 {
+			return nil, fmt.Errorf("provider %d: empty or unsupported subscription format", providerIndex+1)
+		}
+		for index, rawURI := range uris {
 			tag := "sub-" + unsafeName.ReplaceAllString(subscription.Name, "-") + "-" + nodeName(fragment(rawURI), index+1)
 			item, err := parseURI(rawURI, tag)
 			if err != nil {
-				errorsFound = append(errorsFound, fmt.Sprintf("%s:%d: invalid node", subscription.Name, index+1))
-				continue
+				return nil, fmt.Errorf("provider %d node %d: %s", providerIndex+1, index+1, err)
 			}
+			if tags[tag] {
+				return nil, errors.New("outbound tag collision")
+			}
+			tags[tag] = true
 			fingerprintData := make(map[string]any, len(item))
 			for key, value := range item {
 				if key != "tag" {
@@ -377,27 +517,24 @@ func (m *Manager) build() (map[string]any, error) {
 				item["outbounds"] = append(generatedTags, existing...)
 			}
 		}
-		filtered := make([]any, 0, len(values)+len(outbounds))
-		for _, value := range values {
-			item, _ := value.(map[string]any)
-			if tag, _ := item["tag"].(string); !strings.HasPrefix(tag, "sub-") {
-				filtered = append(filtered, value)
-			}
-		}
+		filtered := append([]any(nil), values...)
 		for _, item := range outbounds {
 			filtered = append(filtered, item)
 		}
 		base["outbounds"] = filtered
 	}
+	if err := os.MkdirAll(filepath.Dir(m.output), 0o755); err != nil {
+		return nil, errors.New("create output directory failed")
+	}
 	temporary, err := os.CreateTemp(filepath.Dir(m.output), ".config-*")
 	if err != nil {
-		return nil, err
+		return nil, errors.New("create candidate config failed")
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
 	if err := temporary.Chmod(0o640); err != nil {
 		_ = temporary.Close()
-		return nil, err
+		return nil, errors.New("set candidate permissions failed")
 	}
 	data, err := json.MarshalIndent(base, "", "  ")
 	if err == nil {
@@ -407,18 +544,27 @@ func (m *Manager) build() (map[string]any, error) {
 		err = closeErr
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.New("write candidate config failed")
 	}
 	if err := m.validate(temporaryName); err != nil {
-		return nil, err
+		return nil, errors.New("config validation failed")
 	}
-	if existing, err := os.ReadFile(m.output); err == nil {
-		_ = os.WriteFile(strings.TrimSuffix(m.output, filepath.Ext(m.output))+".previous.json", existing, 0o600)
+	if persist {
+		// Both files are validated before commit. A process crash between these
+		// renames is not atomic across files; the next refresh rebuilds from state.
+		if err := writeJSONAtomic(m.state, state); err != nil {
+			return nil, errors.New("persist state failed")
+		}
 	}
 	if err := os.Rename(temporaryName, m.output); err != nil {
-		return nil, err
+		if persist {
+			if rollbackErr := writeJSONAtomic(m.state, previous); rollbackErr != nil {
+				return nil, errors.New("publish config and rollback state failed")
+			}
+		}
+		return nil, errors.New("publish config failed")
 	}
-	return map[string]any{"nodes": len(outbounds), "errors": errorsFound[:min(20, len(errorsFound))]}, nil
+	return map[string]any{"nodes": len(outbounds), "errors": []string{}}, nil
 }
 
 func fragment(raw string) string {
@@ -433,13 +579,6 @@ func fragment(raw string) string {
 	return decoded
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func (m *Manager) reply(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -449,11 +588,20 @@ func (m *Manager) reply(w http.ResponseWriter, status int, value any) {
 func (m *Manager) handler(w http.ResponseWriter, request *http.Request) {
 	switch {
 	case request.Method == http.MethodGet && request.URL.Path == "/health":
-		m.reply(w, http.StatusOK, map[string]any{"ok": true, "output": m.output})
+		m.healthMu.Lock()
+		defer m.healthMu.Unlock()
+		ready := !m.lastSuccess.IsZero() && m.lastError == ""
+		status := http.StatusOK
+		if !ready {
+			status = http.StatusServiceUnavailable
+		}
+		m.reply(w, status, map[string]any{"ok": ready, "last_attempt": m.lastAttempt, "last_success": m.lastSuccess, "nodes": m.nodes, "error": m.lastError})
 	case request.Method == http.MethodGet && request.URL.Path == "/subscriptions":
+		m.mu.Lock()
 		state, err := readState(m.state)
+		m.mu.Unlock()
 		if err != nil {
-			m.reply(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			m.reply(w, http.StatusInternalServerError, map[string]string{"error": "read state failed"})
 			return
 		}
 		names := make([]map[string]string, len(state.Subscriptions))
@@ -462,14 +610,21 @@ func (m *Manager) handler(w http.ResponseWriter, request *http.Request) {
 		}
 		m.reply(w, http.StatusOK, map[string]any{"subscriptions": names})
 	case request.Method == http.MethodPost && (request.URL.Path == "/subscriptions" || request.URL.Path == "/refresh"):
+		var add *Subscription
 		if request.URL.Path == "/subscriptions" {
 			if request.ContentLength <= 0 || request.ContentLength > maxRequestBody {
 				m.reply(w, http.StatusBadRequest, map[string]string{"error": "request body must be between 1 and 65536 bytes"})
 				return
 			}
 			var payload Subscription
-			if err := json.NewDecoder(http.MaxBytesReader(w, request.Body, maxRequestBody)).Decode(&payload); err != nil {
-				m.reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			decoder := json.NewDecoder(http.MaxBytesReader(w, request.Body, maxRequestBody))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&payload); err != nil {
+				m.reply(w, http.StatusBadRequest, map[string]string{"error": "invalid request JSON"})
+				return
+			}
+			if err := decoder.Decode(new(any)); err != io.EOF {
+				m.reply(w, http.StatusBadRequest, map[string]string{"error": "request must contain one JSON object"})
 				return
 			}
 			parsed, err := url.Parse(payload.URL)
@@ -477,24 +632,9 @@ func (m *Manager) handler(w http.ResponseWriter, request *http.Request) {
 				m.reply(w, http.StatusBadRequest, map[string]string{"error": "name and an https URL are required"})
 				return
 			}
-			state, err := readState(m.state)
-			if err != nil {
-				m.reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			filtered := state.Subscriptions[:0]
-			for _, subscription := range state.Subscriptions {
-				if subscription.Name != payload.Name {
-					filtered = append(filtered, subscription)
-				}
-			}
-			state.Subscriptions = append(filtered, payload)
-			if err := writeJSONAtomic(m.state, state); err != nil {
-				m.reply(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
+			add = &payload
 		}
-		result, err := m.build()
+		result, err := m.update(add)
 		if err != nil {
 			m.reply(w, http.StatusBadRequest, map[string]string{"error": "refresh failed; check service logs"})
 			return
@@ -506,29 +646,44 @@ func (m *Manager) handler(w http.ResponseWriter, request *http.Request) {
 }
 
 func (m *Manager) run() error {
-	if err := os.MkdirAll(filepath.Dir(m.output), 0o755); err != nil {
-		return err
-	}
-	if _, err := os.Stat(m.output); errors.Is(err, os.ErrNotExist) {
-		data, err := os.ReadFile(m.base)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(m.output, data, 0o600); err != nil {
-			return err
-		}
+	if m.interval <= 0 {
+		return errors.New("refresh interval must be positive")
 	}
 	server := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", m.port), Handler: http.HandlerFunc(m.handler), ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Printf("HTTP server failed: %v\n", err)
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return errors.New("HTTP bind failed")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if server.Shutdown(shutdown) != nil {
+			_ = server.Close()
 		}
 	}()
+	serverErrors := make(chan error, 1)
+	go func() {
+		serverErrors <- server.Serve(listener)
+	}()
+	refreshDone := make(chan struct{}, 1)
+	start := func() { go func() { _, _ = m.build(); refreshDone <- struct{}{} }() }
+	start()
+	timer := time.NewTimer(m.interval)
+	defer timer.Stop()
+	timer.Stop()
 	for {
-		if _, err := m.build(); err != nil {
-			fmt.Printf("refresh failed: %v\n", err)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-serverErrors:
+			return errors.New("HTTP server stopped")
+		case <-refreshDone:
+			timer.Reset(m.interval)
+		case <-timer.C:
+			start()
 		}
-		time.Sleep(m.interval)
 	}
 }
 

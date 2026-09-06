@@ -1,14 +1,18 @@
 [Unit]
 Description=Telemt egress interception through sing-box
 After=docker.service network-online.target
+Requires=docker.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=-/etc/default/telemt-egress-tproxy
+ExecStartPre=/usr/local/sbin/telemt-egress-tproxy ready
 ExecStart=/usr/local/sbin/telemt-egress-tproxy start
+ExecReload=/usr/local/sbin/telemt-egress-tproxy restart
 ExecStop=/usr/local/sbin/telemt-egress-tproxy stop
+TimeoutStartSec=75
 
 [Install]
 WantedBy=multi-user.target

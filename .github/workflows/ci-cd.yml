@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -26,6 +26,8 @@ jobs:
           cache-dependency-path: subscription-manager/go.mod
       - name: Run checks
         run: make check
+      - name: Isolated deployment smoke test
+        run: make deployment-smoke
 
   build:
     name: Build Docker image
@@ -50,9 +52,16 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          command_timeout: 30m
           script: |
             set -eu
             cd "${{ secrets.VM_PROJECT_PATH }}"
-            git pull --ff-only origin main
-            make deploy
+            exec 9>.deploy.lock
+            flock -x 9
+            test -z "$(git status --porcelain --untracked-files=no)"
+            git fetch origin main
+            sha='${{ github.sha }}'
+            test "$(git rev-parse --verify "$sha^{commit}")" = "$sha"
+            git checkout --detach "$sha"
+            DEPLOY_LOCKED=1 make deploy
             make status
