@@ -174,17 +174,17 @@ in the check job.
 The manager's sing-box validator and router use the same pinned image digest;
 update both together (and the Makefile validation image).
 
-Pull requests run checks and build the manager image. Pushes to main deploy only
-after both jobs pass. Set GitHub Actions secrets `VM_HOST`, `VM_USER`, `VM_SSH_KEY`,
-and `VM_PROJECT_PATH` (the absolute checkout path). Main workflows are not canceled
-in progress, and production jobs are serialized. SSH takes the same host deployment
-lock before fetching/checking out and holds it through activation. It rejects a
-dirty tracked worktree, fetches origin/main, verifies the exact `github.sha` commit,
-then uses non-destructive `git checkout --detach` of that SHA, not `git pull`.
-Ignored config, state and runtime files remain in place; obstructing untracked
-files cause checkout to fail rather than being removed. The deployment checkout
-will remain detached. Pending GitHub concurrency jobs may be superseded; this is
-not a guarantee that every push gets deployed.
+Pull requests run checks, an isolated deployment smoke test, and image builds
+without publishing. Pushes to main publish the tested manager image and deploy
+only after those jobs pass. Set GitHub Actions secrets `VM_HOST`, `VM_USER`,
+`VM_SSH_KEY`, and `VM_PROJECT_PATH` (the absolute checkout path). Main workflows
+are not canceled in progress, and production jobs are serialized. SSH takes the
+same host deployment lock before fetching and holds it through activation. It
+requires branch `main`, rejects tracked changes and stale runs, then fast-forward
+merges the exact tested SHA. Non-conflicting untracked backups stay in place; Git
+refuses a merge that would overwrite one. Ignored config, state and runtime files
+remain in place. Pending GitHub concurrency jobs may be superseded; this is not a
+guarantee that every push gets deployed.
 
 ## Optional Catalog Shadow
 
@@ -282,9 +282,10 @@ Push main публикует **эти же** образы в GHCR через `ma
 Версии build args по-прежнему приходят из Make, определения сборки — из Compose.
 
 SSH CD передаёт SHA, manifest и временный token в `make ci-deploy`.
-Эта цель из `makefiles/ci-deploy.mk` под одной блокировкой проверяет чистый main,
-отклоняет устаревший workflow, fast-forward обновляет checkout до проверенного SHA,
-временно авторизует Docker в GHCR и вызывает `make image-deploy` из нового Makefile.
+Эта цель из `makefiles/ci-deploy.mk` под одной блокировкой проверяет main без
+локальных изменений отслеживаемых файлов, отклоняет устаревший workflow и
+fast-forward обновляет checkout до проверенного SHA. Затем она временно
+авторизует Docker в GHCR и вызывает `make image-deploy` из нового Makefile.
 Сначала скачиваются все образы, затем `image-activate` сохраняет подготовку/миграции
 этого проекта и запускает Compose с `--no-build --pull never --wait`.
 Доступ к registry удаляется и при ошибке. `ci-deploy` требует переменные
@@ -295,8 +296,10 @@ SSH CD передаёт SHA, manifest и временный token в `make ci-de
 `git show` из SHA этого workflow. Поэтому первый деплой работает и со старым
 checkout без новой цели. Загруженный файл сам проверяет актуальность SHA и повторно
 делает fetch после захвата блокировки; параллельные доставки не обновляют checkout
-во время активации. Обычные `make up` и существующие `make deploy` сохраняют
-свои прежние контракты; для CI служит отдельная цель `ci-deploy`.
+во время активации. Незакоммиченные отслеживаемые файлы блокируют доставку, а Git
+сохраняет несвязанные неотслеживаемые файлы и отказывает, если merge затёр бы их.
+Обычные `make up` и существующие `make deploy` сохраняют свои прежние контракты;
+для CI служит отдельная цель `ci-deploy`.
 
 Для CI разрешите GitHub Actions запись Packages. Новые GHCR packages по умолчанию
 private; настройте наследование доступа от этого репозитория. Автоматический CD

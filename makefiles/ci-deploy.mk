@@ -14,7 +14,7 @@ ci-deploy:
 	exec 9>"$(IMAGE_DEPLOY_LOCK)"; \
 	flock -w 1800 9; \
 	test "$$(git branch --show-current)" = main; \
-	test -z "$$(git status --porcelain --untracked-files=all)"; \
+	test -z "$$(git status --porcelain --untracked-files=no)"; \
 	git fetch --quiet origin refs/heads/main; \
 	test "$$(git rev-parse FETCH_HEAD)" = "$$DEPLOY_SHA" || { echo 'Stale workflow: main changed' >&2; exit 1; }; \
 	git merge --ff-only --quiet "$$DEPLOY_SHA"; \

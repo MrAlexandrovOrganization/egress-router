@@ -117,6 +117,19 @@ class CIDeployTests(unittest.TestCase):
     def test_main_behind_three_fast_forwards(self):
         self.assert_deployed(self.deploy())
 
+    def test_non_conflicting_untracked_backup_is_preserved(self):
+        backup = self.server / "config.json.before-listen-fix-20260907T230645Z"
+        backup.write_text("preserve this backup")
+        self.assert_deployed(self.deploy())
+        self.assertEqual(backup.read_text(), "preserve this backup")
+
+    def test_untracked_file_obstructing_checkout_is_preserved(self):
+        self.tip = self.commit(self.origin, "incoming-file")
+        obstruction = self.server / "incoming-file"
+        obstruction.write_text("preserve this untracked file")
+        self.assert_refused(self.deploy(), self.base)
+        self.assertEqual(obstruction.read_text(), "preserve this untracked file")
+
     def test_detached_checkout_is_preserved(self):
         self.git(self.server, "checkout", "--detach", self.base)
         result = self.deploy()
