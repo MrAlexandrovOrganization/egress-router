@@ -5,3 +5,6 @@ runtime/*
 state/
 .deploy.lock
 subscription-manager/subscriptions.json
+
+# Local image release manifests and activation state
+/.images/

@@ -1,4 +1,5 @@
 COMPOSE := docker compose -p egress-router -f ../docker-compose.yaml
+include ../versions.mk
 API := http://127.0.0.1:19091
 export NAME URL
 

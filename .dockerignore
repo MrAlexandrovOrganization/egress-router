@@ -1,0 +1,9 @@
+
+.images
+
+# Keep credentials and delivery metadata out of images
+.git
+.env
+.env.*
+**/.env
+**/.env.*

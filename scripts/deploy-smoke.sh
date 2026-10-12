@@ -7,7 +7,7 @@ docker run --rm -i --network none --read-only --tmpfs /work:rw,nosuid,nodev \
     -v "$PWD/scripts/deploy.sh:/input/deploy.sh:ro" \
     -v "$PWD/config.json.example:/input/config.json.example:ro" \
     -v "$PWD/subscription-manager/subscriptions.json.example:/input/subscriptions.json.example:ro" \
-    -w /work debian:bookworm-slim bash -s <<'TEST'
+    -w /work "${SMOKE_IMAGE:?Run make deployment-smoke}" bash -s <<'TEST'
 set -euo pipefail
 mkdir subscription-manager
 cp /input/config.json.example .

@@ -1,15 +1,17 @@
-"""Exercise the actual SSH script with local Git repos and fake make/flock."""
+"""Exercise the GitHub SSH wrapper and the actual standalone CI deploy Makefile."""
 
 import os
 from pathlib import Path
-import shlex
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci-cd.yml"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github/workflows/ci-cd.yml"
+CI_DEPLOY = ROOT / "makefiles/ci-deploy.mk"
 
 
 class CIDeployTests(unittest.TestCase):
@@ -25,6 +27,7 @@ class CIDeployTests(unittest.TestCase):
         self.env = {
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "HOME": str(self.root),
+            "TMPDIR": "/private/tmp" if sys.platform == "darwin" else "/tmp",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
@@ -32,21 +35,41 @@ class CIDeployTests(unittest.TestCase):
             "GIT_AUTHOR_EMAIL": "ci@example.invalid",
             "GIT_COMMITTER_NAME": "CI Test",
             "GIT_COMMITTER_EMAIL": "ci@example.invalid",
+            "DEPLOY_TEST_CALLS": str(self.calls),
         }
-        for name, body in {
-            "flock": 'test "$*" = "-x 9"\ntest -e .deploy.lock\nprintf "flock\\n"',
-            "make": 'printf "make %s locked=%s branch=%s head=%s\\n" "$*" '
-                    '"${DEPLOY_LOCKED:-}" "$(git symbolic-ref --short HEAD)" "$(git rev-parse HEAD)"',
-        }.items():
-            path = self.bin / name
-            path.write_text("#!/bin/sh\nset -eu\n{\n" + body + "\n} >> "
-                            + shlex.quote(str(self.calls)) + "\n")
-            path.chmod(0o755)
+        self.write_command(
+            "flock",
+            'test "$*" = "-w 1800 9"\n'
+            'test -f .deploy.lock\nprintf "flock\\n" >> "$DEPLOY_TEST_CALLS"',
+        )
+        self.write_command(
+            "docker",
+            'test "$*" = "login ghcr.io -u ci-user --password-stdin"\n'
+            'token=$(cat)\ntest "$token" = synthetic-token\n'
+            'printf "docker-login\\n" >> "$DEPLOY_TEST_CALLS"',
+        )
         self.git(self.root, "init", "-b", "main", str(self.origin))
+        (self.origin / "makefiles").mkdir()
+        (self.origin / "makefiles/ci-deploy.mk").write_bytes(CI_DEPLOY.read_bytes())
+        (self.origin / ".gitignore").write_text(".deploy.lock\n")
+        (self.origin / "Makefile").write_text(
+            "include makefiles/ci-deploy.mk\n\n"
+            ".PHONY: image-deploy\n"
+            "image-deploy:\n"
+            '\t@test "$${IMAGE_DEPLOY_LOCKED:-}" = 1\n'
+            '\t@test -z "$${GHCR_TOKEN:-}"\n'
+            '\t@printf "image-deploy\\n" >> "$${DEPLOY_TEST_CALLS}"\n'
+        )
         self.base = self.commit(self.origin, "base")
         self.git(self.root, "clone", str(self.origin), str(self.server))
+        self.tip = self.base
         for index in range(3):
             self.tip = self.commit(self.origin, f"upstream-{index}")
+
+    def write_command(self, name, body):
+        path = self.bin / name
+        path.write_text("#!/bin/sh\nset -eu\n" + body + "\n")
+        path.chmod(0o755)
 
     def git(self, repo, *args):
         return subprocess.run(
@@ -56,7 +79,7 @@ class CIDeployTests(unittest.TestCase):
 
     def commit(self, repo, name):
         (repo / name).write_text(name)
-        self.git(repo, "add", name)
+        self.git(repo, "add", "-A")
         self.git(repo, "commit", "-m", name)
         return self.git(repo, "rev-parse", "HEAD")
 
@@ -67,10 +90,15 @@ class CIDeployTests(unittest.TestCase):
         while end < len(lines) and (not lines[end].strip() or lines[end].startswith("            ")):
             end += 1
         script = textwrap.dedent("\n".join(lines[start:end]))
-        script = script.replace("${{ secrets.VM_PROJECT_PATH }}", str(self.server))
-        script = script.replace("${{ github.sha }}", sha or self.tip)
         self.assertNotIn("${{", script)
-        return subprocess.run(["sh", "-c", script], cwd=self.root, env=self.env,
+        env = self.env | {
+            "PROJECT_PATH": str(self.server),
+            "DEPLOY_SHA": sha or self.tip,
+            "IMAGE_MANIFEST_B64": "e30=",
+            "GHCR_USER": "ci-user",
+            "GHCR_TOKEN": "synthetic-token",
+        }
+        return subprocess.run(["sh", "-c", script], cwd=self.root, env=env,
                               text=True, capture_output=True)
 
     def assert_deployed(self, result):
@@ -78,36 +106,30 @@ class CIDeployTests(unittest.TestCase):
         self.assertEqual(self.git(self.server, "symbolic-ref", "--short", "HEAD"), "main")
         self.assertEqual(self.git(self.server, "rev-parse", "HEAD"), self.tip)
         self.assertEqual(self.calls.read_text().splitlines(), [
-            "flock",
-            f"make deploy locked=1 branch=main head={self.tip}",
-            f"make status locked= branch=main head={self.tip}",
+            "flock", "docker-login", "image-deploy",
         ])
 
     def assert_refused(self, result, main):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.calls.read_text(), "flock\n")
+        self.assertEqual(self.calls.read_text().splitlines(), ["flock"])
         self.assertEqual(self.git(self.server, "rev-parse", "main"), main)
 
     def test_main_behind_three_fast_forwards(self):
         self.assert_deployed(self.deploy())
 
-    def test_detached_checkout_returns_to_main(self):
+    def test_detached_checkout_is_preserved(self):
         self.git(self.server, "checkout", "--detach", self.base)
-        self.assert_deployed(self.deploy())
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.git(self.server, "rev-parse", "HEAD"), self.base)
+        self.assertEqual(self.calls.read_text().splitlines(), ["flock"])
 
     def test_main_already_at_tested_commit(self):
         self.git(self.server, "pull", "--ff-only", "origin", "main")
         self.assert_deployed(self.deploy())
 
-    def test_stale_run_skips_without_switching_or_deploying(self):
-        self.git(self.server, "checkout", "--detach", self.base)
-        result = self.deploy(self.base)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Skipping deployment: origin/main no longer matches the tested commit.", result.stdout)
-        self.assertEqual(self.calls.read_text(), "flock\n")
-        self.assertEqual(self.git(self.server, "rev-parse", "HEAD"), self.base)
-        self.assertEqual(self.git(self.server, "rev-parse", "main"), self.base)
-        self.assertEqual(self.git(self.server, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
+    def test_stale_workflow_is_refused(self):
+        self.assert_refused(self.deploy(self.base), self.base)
 
     def test_diverged_main_is_preserved(self):
         local = self.commit(self.server, "local")
@@ -124,7 +146,10 @@ class CIDeployTests(unittest.TestCase):
         self.assertEqual((self.server / "base").read_text(), "dirty")
 
     def test_invalid_tested_commit_is_refused(self):
-        self.assert_refused(self.deploy("0" * 40), self.base)
+        result = self.deploy("0" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.git(self.server, "rev-parse", "HEAD"), self.base)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,10 @@ services:
   subscription-manager:
     build:
       context: ./subscription-manager
+      args:
+        GO_VERSION: ${GO_VERSION:?Run via make}
+        ALPINE_VERSION: ${ALPINE_VERSION:?Run via make}
+        SING_BOX_IMAGE: ${SING_BOX_IMAGE:?Run via make}
     container_name: subscription-manager
     restart: unless-stopped
     user: "${EGRESS_UID:-1000}:${EGRESS_GID:-1000}"
@@ -34,7 +38,7 @@ services:
         max-file: "3"
 
   egress-router:
-    image: ghcr.io/sagernet/sing-box:v1.14.0@sha256:4bed9332a0013fef72c31200a84e8fc0ed91a5ab2fe373a69f0acbbbbfbef3c5
+    image: ${SING_BOX_IMAGE:?Run via make}
     container_name: egress-router
     restart: unless-stopped
     group_add:

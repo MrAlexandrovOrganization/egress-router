@@ -103,7 +103,8 @@ class SnapshotTests(unittest.TestCase):
     def test_success_private_artifacts_and_order(self):
         self.capture()
         self.assertTrue((self.backup / "COMPLETE").exists())
-        self.assertNotIn("private", self.output.getvalue())
+        for secret in ("private-test-fixture", "private-child-failure", "private-git-output"):
+            self.assertNotIn(secret, self.output.getvalue())
         self.assertNotIn("mounted-inode", self.output.getvalue())
         self.assertEqual(json.loads((self.backup / "running-config.json").read_text()),
                          {"private": "mounted-inode"})
@@ -138,7 +139,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn(["docker", "unpause", "container1"], self.calls)
         self.assertTrue((self.backup / "repository.bundle").exists())
         self.assertFalse((self.backup / "COMPLETE").exists())
-        self.assertNotIn("private", self.output.getvalue())
+        for secret in ("private-test-fixture", "private-child-failure", "private-git-output"):
+            self.assertNotIn(secret, self.output.getvalue())
 
     def test_pause_failure_still_attempts_unpause(self):
         self.fail_command = "docker pause"

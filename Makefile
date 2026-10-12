@@ -3,7 +3,7 @@ export NAME URL
 export EGRESS_UID EGRESS_GID
 
 COMPOSE := docker compose -p egress-router -f docker-compose.yaml
-SING_BOX_IMAGE := ghcr.io/sagernet/sing-box:v1.14.0@sha256:4bed9332a0013fef72c31200a84e8fc0ed91a5ab2fe373a69f0acbbbbfbef3c5
+include versions.mk
 
 init:
 	@bash scripts/deploy.sh init
@@ -75,3 +75,36 @@ rollback:
 
 deployment-smoke:
 	@bash scripts/deploy-smoke.sh
+
+.PHONY: versions
+versions:
+	@$(foreach v,$(VERSION_VARS),printf '%s=%s\n' '$(v)' '$($(v))';)
+
+.PHONY: compose
+ARGS ?= ps
+compose:
+	$(COMPOSE) $(ARGS)
+
+# CI builds/publishes once; VM activates immutable digests (Python 3 + Docker required).
+export IMAGE_COMPOSE_FILE := docker-compose.yaml
+export IMAGE_PROJECT_NAME := egress-router
+.PHONY: image-build image-publish image-deploy image-activate
+image-build:
+	python3 scripts/images.py build
+image-publish:
+	python3 scripts/images.py publish
+image-deploy:
+	python3 scripts/images.py deploy
+image-activate:
+	IMAGE_COMPOSE="$(IMAGE_COMPOSE)" IMAGE_NO_BUILD=1 bash scripts/deploy.sh deploy
+
+.PHONY: image-check
+image-check:
+	python3 -B scripts/test_images.py
+
+.PHONY: image-compose
+export IMAGE_ARGS
+image-compose:
+	python3 scripts/images.py compose
+
+include makefiles/ci-deploy.mk

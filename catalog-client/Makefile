@@ -1,4 +1,5 @@
 .PHONY: build fmt fmt-check lint test check generate
+include ../versions.mk
 
 MODULE := github.com/MrAlexandrovOrganization/egress-router/catalog-client
 PROTO := catalog/v1/catalog.proto
@@ -20,10 +21,10 @@ test:
 
 check: fmt-check lint test
 
-# protoc 34.0; pinned plugins and local M mappings override the owner's go_package.
+# Pinned plugins and local M mappings override the owner's go_package.
 generate:
-	@test "$$(protoc --version)" = 'libprotoc 34.0'
+	@test "$$(protoc --version)" = 'libprotoc $(PROTOC_VERSION)'
 	mkdir -p .tools internal/gen/catalogv1
-	GOBIN=$(CURDIR)/.tools go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
-	GOBIN=$(CURDIR)/.tools go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+	GOBIN=$(CURDIR)/.tools go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	GOBIN=$(CURDIR)/.tools go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v$(PROTOC_GEN_GO_GRPC_VERSION)
 	PATH="$(CURDIR)/.tools:$$PATH" protoc -I api/proto --go_out=. --go_opt=module=$(MODULE) --go_opt=M$(PROTO)=$(MODULE)/internal/gen/catalogv1 --go-grpc_out=. --go-grpc_opt=module=$(MODULE) --go-grpc_opt=M$(PROTO)=$(MODULE)/internal/gen/catalogv1 $(PROTO)

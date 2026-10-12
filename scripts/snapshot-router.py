@@ -102,7 +102,11 @@ Never run git reset, make deploy, make refresh, or a latest-image pull to recove
    This may fail if validation needs DNS or other mounts; investigate, do not
    claim successful validation or activate unverified configuration.
 6. Recreate ONLY the router after reviewing mounts and image overrides:
-   `docker compose -p egress-router -f "$RECOVERY/docker-compose.yaml" -f "$BACKUP/image-override.yaml" up -d --no-build --pull never --no-deps --force-recreate egress-router`
+   For snapshots with versions.mk, Make supplies required image/build variables:
+   `make -C "$RECOVERY" compose ARGS="-f '$BACKUP/image-override.yaml' up -d --no-build --pull never --no-deps --force-recreate egress-router"`
+   For legacy snapshots without versions.mk, invoke Docker Compose directly with
+   the recovered docker-compose.yaml and saved image-override.yaml, using the same
+   no-build/no-pull/no-deps flags.
    Verify container health and real HTTPS through its proxy, e.g.
    `curl --fail --silent --show-error --max-time 15 --noproxy '' --proxy http://127.0.0.1:10880 https://cp.cloudflare.com/generate_204 -o /dev/null`.
    Check telemt routing separately. If this fails, keep the manager stopped and

@@ -2,3 +2,11 @@
 !Dockerfile
 !go.mod
 !*.go
+
+# Keep credentials and delivery metadata out of images
+.git
+.env
+.env.*
+**/.env
+**/.env.*
+.images

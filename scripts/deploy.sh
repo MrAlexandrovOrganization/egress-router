@@ -15,6 +15,10 @@ export EGRESS_UID=${EGRESS_UID:-1000} EGRESS_GID=${EGRESS_GID:-1000}
 sudo bash scripts/init.sh "$EGRESS_UID" "$EGRESS_GID"
 [[ $action != init ]] || exit 0
 compose=(docker compose -p egress-router -f docker-compose.yaml)
+if [[ -n ${IMAGE_COMPOSE:-} ]]; then
+    # IMAGE_COMPOSE is generated locally by images.py; split shell quoting safely.
+    mapfile -d '' -t compose < <(python3 -c 'import os,shlex,sys; sys.stdout.buffer.write(b"\0".join(x.encode() for x in shlex.split(os.environ["IMAGE_COMPOSE"])) + b"\0")')
+fi
 api=http://127.0.0.1:19091
 generation_failed() {
     printf 'Generation failed; active config unchanged\n' >&2
@@ -54,7 +58,11 @@ if [[ $action == rollback ]]; then
     candidate=runtime/previous.json
 else
     if [[ $action == deploy ]]; then
-        "${compose[@]}" up -d --build --no-deps subscription-manager
+        if [[ ${IMAGE_NO_BUILD:-0} == 1 ]]; then
+            "${compose[@]}" up -d --no-build --pull never --no-deps subscription-manager
+        else
+            "${compose[@]}" up -d --build --no-deps subscription-manager
+        fi
     fi
     # Health can be 503 before the first build or after failure. Wait for HTTP
     # readiness, not health, so a corrective add/refresh can recover the manager.

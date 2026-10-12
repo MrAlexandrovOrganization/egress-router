@@ -1,5 +1,13 @@
 # egress-router
 
+## Build versions
+
+`versions.mk` owns image tags/digests and generator versions; Go and the Go
+protobuf generator version are read from the corresponding module manifests.
+The nested Makefiles include this same file. `make versions` prints resolved
+values. Build, validate and deploy through Make so Compose and deployment scripts
+inherit them. Modules remain independent; no other repository provides versions.
+
 sing-box egress router for telemt and local Docker services.
 
 ## First deployment
@@ -263,3 +271,59 @@ Local mocked tests (no Docker, SSH, production state or root paths accessed):
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_snapshot_router.py' -v
 ```
+
+## Доставка образов из CI
+
+CI выполняет существующие проверки, затем `make image-build` собирает все собственные
+образы из build-секций Compose без runtime-секретов и соседних checkout.
+Push main публикует **эти же** образы в GHCR через `make image-publish`.
+Тег содержит SHA, run ID и attempt; artifact `image-release` содержит digest manifest.
+Платформа — `linux/amd64` (текущая VM). На PR публикации и доставки нет.
+Версии build args по-прежнему приходят из Make, определения сборки — из Compose.
+
+SSH CD передаёт SHA, manifest и временный token в `make ci-deploy`.
+Эта цель из `makefiles/ci-deploy.mk` под одной блокировкой проверяет чистый main,
+отклоняет устаревший workflow, fast-forward обновляет checkout до проверенного SHA,
+временно авторизует Docker в GHCR и вызывает `make image-deploy` из нового Makefile.
+Сначала скачиваются все образы, затем `image-activate` сохраняет подготовку/миграции
+этого проекта и запускает Compose с `--no-build --pull never --wait`.
+Доступ к registry удаляется и при ошибке. `ci-deploy` требует переменные
+`DEPLOY_SHA`, `IMAGE_MANIFEST_B64`, `GHCR_USER`, `GHCR_TOKEN` из окружения;
+не передавайте token аргументом Make или команды.
+
+Короткий SSH-шаг делает fetch и загружает только `makefiles/ci-deploy.mk` через
+`git show` из SHA этого workflow. Поэтому первый деплой работает и со старым
+checkout без новой цели. Загруженный файл сам проверяет актуальность SHA и повторно
+делает fetch после захвата блокировки; параллельные доставки не обновляют checkout
+во время активации. Обычные `make up` и существующие `make deploy` сохраняют
+свои прежние контракты; для CI служит отдельная цель `ci-deploy`.
+
+Для CI разрешите GitHub Actions запись Packages. Новые GHCR packages по умолчанию
+private; настройте наследование доступа от этого репозитория. Автоматический CD
+использует временный `GITHUB_TOKEN` с `packages: read` и временный Docker config,
+который удаляется после SSH-шагa. Для ручной доставки нужен отдельный read-only
+доступ (`read:packages`) или публичный package; приложение секреты получает только на VM.
+VM нужны Python 3.9+, Make, Docker Compose с `--wait`, Git и flock для SSH CD.
+
+`.images/current.json` хранит последний успешный manifest, `previous.json` — предыдущий.
+Для отката сначала согласуйте совместимость БД и конфигурации, верните checkout
+к `revision` выбранного manifest и выполните `make image-deploy IMAGE_MANIFEST=...`.
+Автоматического отката БД/образов нет; не удаляйте нужные digests в GHCR.
+`make up` остаётся локальной сборкой из исходников: на VM для релиза используйте
+`image-deploy`; `logs`/`ps` читают те же контейнеры. Сторонние образы не пересобираются,
+их версии остаются в конфигурации проекта. Внешний registry-кеш между CI runs пока
+не настроен. Успешный build не подтверждает runtime: проверяйте readiness и сценарий
+сервиса после доставки.
+
+Для диагностики и явных CLI-операций из активного образа используйте
+`make image-compose IMAGE_ARGS='ps'`, `IMAGE_ARGS='logs -f'` или
+`IMAGE_ARGS='run --rm SERVICE COMMAND'`. Последняя команда автоматически
+запрещает сборку и pull. Она подходит для явных миграций/CLI, которые раньше
+запускались через локальный Compose-образ. После неуспешной активации
+`.images/requested.json` сохраняет manifest попытки; `current.json` остаётся
+последним успешным и не гарантирует, что частичный rollout откатился.
+
+Ручной `image-deploy` использует тот же host lock, что SSH CD; не запускайте
+обходные Compose-операции одновременно с доставкой. При первом переходе на GHCR
+`previous.json` ещё отсутствует: сохраните прежние локальные образы и конфигурацию
+для восстановления по runbook до первого релиза.
